@@ -34,7 +34,7 @@
 | Dependency | Version | Notes |
 |---|---|---|
 | [FreeBASIC](https://www.freebasic.net) | 1.10.1 | Compiler |
-| [libvt](https://github.com/rbreitinger/libvt) | 1.4.0+ | Place `vt/` folder next to source |
+| [libvt](https://github.com/rbreitinger/libvt) | 1.4.0+ | Place `vt/` folder in your FreeBASIC `inc/` folder |
 
 Clone or download libvt and place the `vt/` directory in your FreeBASIC `inc/` folder.
 
