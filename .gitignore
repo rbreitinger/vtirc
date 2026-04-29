@@ -1,0 +1,7 @@
+Thumbs.db
+.vtirc
+*.dll
+*.exe
+*.fbs
+*.log
+int_*.*
