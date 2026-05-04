@@ -6,7 +6,7 @@
 #Define VT_USE_TUI
 #Include Once "vt/vt.bi"
 
-Const VERSION      = "1.1.0"
+Const VERSION      = "1.1.1"
 Const HISTORY_MAX  = 2000
 Const CHAT_TOP_ROW = 2
 Const CHAT_BOT_ROW = 37
