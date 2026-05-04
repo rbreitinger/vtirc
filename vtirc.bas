@@ -6,7 +6,7 @@
 #Define VT_USE_TUI
 #Include Once "vt/vt.bi"
 
-Const VERSION      = "1.1.1"
+Const VERSION      = "1.1.2"
 Const HISTORY_MAX  = 2000
 Const CHAT_TOP_ROW = 2
 Const CHAT_BOT_ROW = 37
@@ -291,7 +291,7 @@ End Sub
 ' Draw
 ' -----------------------------------------------------------------------------
 Sub draw_titlebar()
-    Dim lbl_left  As String = " [ VTIRC " & VERSION & "]"
+    Dim lbl_left  As String = " [ VTIRC " & VERSION & " ]"
     Dim lbl_right As String = "[ " & cfg.server & " / " & wins(active_win).target & " ] "
     Dim gap       As Long   = SCREEN_COLS - Len(lbl_left) - Len(lbl_right)
     If gap < 0 Then gap = 0
@@ -1484,15 +1484,15 @@ Do
 
     vt_view_print( CHAT_TOP_ROW, CHAT_BOT_ROW, CHAT_COL, SCREEN_COLS )
 
+    ' -- mouse state ----------------------------------------------------------
+    vt_getmouse(@mx, @my, @mb, @whl)
+
     ' -- pane listbox: mouse-only (k=0 so keyboard goes to chat input) --------
     Dim pane_ret As Long = VT_FORM_PENDING
     If user_count > 0 Then
         pane_ret = vt_tui_listbox_handle(1, CHAT_TOP_ROW, PANE_W, CHAT_ROWS, _
                                          pane_items(), pane_lb_st, 0)
     End If
-
-    ' -- mouse state ----------------------------------------------------------
-    vt_getmouse(@mx, @my, @mb, @whl)
 
     ' -- PM button click (left-button press edge) or listbox double-click -----
     Dim pm_fire As Byte = 0
@@ -1534,7 +1534,7 @@ Do
     End If
 
     ' -- mouse wheel scroll (per active window) --------------------------------
-    If whl <> 0 Then
+    If whl <> 0 AndAlso mx >= CHAT_COL Then
         max_scr = wins(active_win).hist_count - CHAT_ROWS
         If whl > 0 Then
             If max_scr > 0 AndAlso wins(active_win).top_line < max_scr Then
