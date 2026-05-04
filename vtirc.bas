@@ -6,7 +6,10 @@
 #Define VT_USE_TUI
 #Include Once "vt/vt.bi"
 
-Const VERSION      = "1.1.2"
+' IDEAS:
+' show last n messages from logfile when starting the client (maybe 300?)
+
+Const VERSION      = "1.1.3"
 Const HISTORY_MAX  = 2000
 Const CHAT_TOP_ROW = 2
 Const CHAT_BOT_ROW = 37
@@ -119,16 +122,24 @@ Sub scheme_apply()
     Case 1  ' Classic
         col_bg_main  = VT_BLACK      : col_fg_body  = VT_LIGHT_GREY
         col_fg_own   = VT_WHITE      : col_fg_other = VT_YELLOW
-        col_fg_sys   = VT_GREEN      : col_bar_fg   = VT_CYAN  : col_bar_bg = VT_BLUE
+        col_fg_sys   = VT_GREEN      : col_bar_fg   = VT_BRIGHT_MAGENTA : col_bar_bg = VT_BLUE
     Case 2  ' Light
         col_bg_main  = VT_LIGHT_GREY : col_fg_body  = VT_BLACK
         col_fg_own   = VT_BLUE       : col_fg_other = VT_RED
-        col_fg_sys   = VT_DARK_GREY  : col_bar_fg   = VT_BLACK  : col_bar_bg = VT_CYAN
+        col_fg_sys   = VT_DARK_GREY  : col_bar_fg   = VT_BLACK  : col_bar_bg = VT_WHITE
     Case Else  ' Dark (0, default)
         col_bg_main  = VT_BLACK      : col_fg_body  = VT_LIGHT_GREY
         col_fg_own   = VT_WHITE      : col_fg_other = VT_BRIGHT_CYAN
-        col_fg_sys   = VT_DARK_GREY  : col_bar_fg   = VT_MAGENTA  : col_bar_bg = VT_BLACK
+        col_fg_sys   = VT_DARK_GREY  : col_bar_fg   = VT_CYAN  : col_bar_bg = VT_DARK_GREY
     End Select
+
+    vt_tui_theme (col_fg_body  , col_bg_main, _     ' window body 
+                  VT_WHITE  , VT_BLUE, _           ' title bar
+                  col_bar_fg, col_bar_bg, _        ' bar/menu
+                  VT_BLACK  , VT_LIGHT_GREY, _     ' button
+                  VT_BLACK  , VT_LIGHT_GREY, _     ' dialogue
+                  col_fg_body, col_bg_main )       ' input field
+                  
 End Sub
 
 Function nick_color(nick_str As String) As UByte
@@ -1482,7 +1493,7 @@ Do
 
     k = vt_inkey()
 
-    vt_view_print( CHAT_TOP_ROW, CHAT_BOT_ROW, CHAT_COL, SCREEN_COLS )
+    vt_view_print( CHAT_TOP_ROW, CHAT_BOT_ROW+1, CHAT_COL, SCREEN_COLS )
 
     ' -- mouse state ----------------------------------------------------------
     vt_getmouse(@mx, @my, @mb, @whl)
