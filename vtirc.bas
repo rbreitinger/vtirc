@@ -1482,6 +1482,8 @@ Do
 
     k = vt_inkey()
 
+    vt_view_print( CHAT_TOP_ROW, CHAT_BOT_ROW, CHAT_COL, SCREEN_COLS )
+
     ' -- pane listbox: mouse-only (k=0 so keyboard goes to chat input) --------
     Dim pane_ret As Long = VT_FORM_PENDING
     If user_count > 0 Then
@@ -1690,6 +1692,8 @@ Do
 
     ' -- network poll ---------------------------------------------------------
     irc_poll()
+
+    'vt_view_print
 
     draw_all()
     vt_sleep(16)
