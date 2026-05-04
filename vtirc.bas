@@ -5,7 +5,7 @@
 #Define VT_USE_TUI
 #Include Once "vt/vt.bi"
 
-Const VERSION      = "1.0.0"
+Const VERSION      = "1.1.0"
 Const HISTORY_MAX  = 2000
 Const CHAT_TOP_ROW = 2
 Const CHAT_BOT_ROW = 22
@@ -596,40 +596,47 @@ Sub help_window()
     Const ED_H = HH - 5
 
     Dim help_txt As String
-    help_txt  = "  Keyboard Shortcuts"                  & VT_LF
-    help_txt &= "  F1          This help"               & VT_LF
-    help_txt &= "  F2          Server settings"         & VT_LF
-    help_txt &= "  F3          Colour / Log settings"   & VT_LF
-    help_txt &= "  F4          User list / PM"          & VT_LF
-    help_txt &= "  F10         Disconnect"              & VT_LF
-    help_txt &= "  Alt+F4      Quit"                    & VT_LF
-    help_txt &= "  Ctrl+Tab    Cycle windows"           & VT_LF
-    help_txt &= "  Ctrl+W      Close PM window"         & VT_LF
-    help_txt &= ""                                      & VT_LF
-    help_txt &= "  Scrolling"                           & VT_LF
-    help_txt &= "  PgUp/PgDn/Wheel  Scroll history"     & VT_LF
-    help_txt &= "  Home             Jump to oldest"     & VT_LF
-    help_txt &= "  End              Jump to newest"     & VT_LF
-    help_txt &= ""                                      & VT_LF
-    help_txt &= "  Commands"                            & VT_LF
-    help_txt &= "  /nick <n>        Change nickname"    & VT_LF
-    help_txt &= "  /names           List channel users" & VT_LF
-    help_txt &= "  /msg <n> [txt]   Open PM window"     & VT_LF
-    help_txt &= "  /afk [msg]       Set away status"    & VT_LF
-    help_txt &= "  /back            Return from AFK"    & VT_LF
-    help_txt &= "  /join <ch>       Join channel"       & VT_LF
-    help_txt &= "  /part            Leave channel"      & VT_LF
-    help_txt &= "  /quit            Disconnect"         & VT_LF
-    help_txt &= ""                                      & VT_LF
-    help_txt &= "  Notices"                             & VT_LF
-    help_txt &= "  Notices from NickServ/services"      & VT_LF
-    help_txt &= "  appear as -nick- message in yellow"  & VT_LF
-    help_txt &= ""                                      & VT_LF
-    help_txt &= "  Color Input (EGA indexes)"           & VT_LF
-    help_txt &= "   ^0=blk ^1=blu ^2=grn ^3=cyn"        & VT_LF
-    help_txt &= "   ^4=red ^5=mag ^6=brn ^7=lgr"        & VT_LF
-    help_txt &= "   ^8=dgr ^9=bblu ^10=bgrn ^11=bcyn"   & VT_LF
-    help_txt &= "   ^12=bred ^13=bmag ^14=yel ^15=wht"
+    help_txt  = " Keyboard Shortcuts"                    & VT_LF
+    help_txt &= "  F1          This help"                & VT_LF
+    help_txt &= "  F2          Server settings"          & VT_LF
+    help_txt &= "  F3          Colour / Log settings"    & VT_LF
+    help_txt &= "  F4          User list / PM"           & VT_LF
+    help_txt &= "  F10         Disconnect"               & VT_LF
+    help_txt &= "  Alt+F4      Quit"                     & VT_LF
+    help_txt &= "  Ctrl+Tab    Cycle windows"            & VT_LF
+    help_txt &= "  Ctrl+W      Close PM window"          & VT_LF
+    help_txt &= ""                                       & VT_LF
+    help_txt &= " Scrolling"                             & VT_LF
+    help_txt &= "  PgUp/PgDn/Wheel  Scroll history"      & VT_LF
+    help_txt &= "  Home             Jump to oldest"      & VT_LF
+    help_txt &= "  End              Jump to newest"      & VT_LF
+    help_txt &= ""                                       & VT_LF
+    help_txt &= " Copy from history"                     & VT_LF
+    help_txt &= "  1)hold LMB and drag to select"        & VT_LF
+    help_txt &= "  2)RMB to copy selection to clipboard" & VT_LF
+    help_txt &= ""                                       & VT_LF
+    help_txt &= " Paste from clipboard"                  & VT_LF
+    help_txt &= "  MMB in chat line or SHIFT+INS"        & VT_LF
+    help_txt &= ""                                       & VT_LF  
+    help_txt &= " Commands"                              & VT_LF
+    help_txt &= "  /nick <n>        Change nickname"     & VT_LF
+    help_txt &= "  /names           List channel users"  & VT_LF
+    help_txt &= "  /msg <n> [txt]   Open PM window"      & VT_LF
+    help_txt &= "  /afk [msg]       Set away status"     & VT_LF
+    help_txt &= "  /back            Return from AFK"     & VT_LF
+    help_txt &= "  /join <ch>       Join channel"        & VT_LF
+    help_txt &= "  /part            Leave channel"       & VT_LF
+    help_txt &= "  /quit            Disconnect"          & VT_LF
+    help_txt &= ""                                       & VT_LF
+    help_txt &= " Notices"                               & VT_LF
+    help_txt &= "  Notices from NickServ/services"       & VT_LF
+    help_txt &= "  appear as -nick- message in yellow"   & VT_LF
+    help_txt &= ""                                       & VT_LF
+    help_txt &= " Color Input (EGA indexes)"             & VT_LF
+    help_txt &= "  ^ 0=blk   ^1=blu   ^2=grn   ^3=cyn"   & VT_LF
+    help_txt &= "  ^ 4=red   ^5=mag   ^6=brn   ^7=lgr"   & VT_LF
+    help_txt &= "  ^ 8=dgr   ^9=bblu ^10=bgrn ^11=bcyn"  & VT_LF
+    help_txt &= "  ^12=bred ^13=bmag ^14=yel  ^15=wht"
 
     Dim ed_st As vt_tui_editor_state
     ed_st.work   = help_txt

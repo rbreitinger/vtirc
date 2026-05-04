@@ -1,5 +1,6 @@
 Thumbs.db
 .vtirc
+*.zip
 *.dll
 *.exe
 *.fbs
