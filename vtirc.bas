@@ -7,6 +7,7 @@
 #Include Once "vt/vt.bi"
 
 Const VERSION      = "1.2.0"
+Const IDLE_MS      = 50
 Const HISTORY_MAX  = 2000
 Const CHAT_TOP_ROW = 2
 Const CHAT_BOT_ROW = 37
@@ -783,7 +784,7 @@ Sub help_window()
         vt_tui_window(HX, HY, HW, HH, " VTIRC Quick Manual - MWheel to scroll ", VT_TUI_WIN_SHADOW)
         vt_tui_editor_draw(ED_X, ED_Y, ED_W, ED_H, ed_st)
         vt_tui_form_draw(hlp_items(), hlp_focused)
-        vt_sleep(16)
+        vt_sleep(IDLE_MS)
     Loop
 End Sub
 
@@ -812,31 +813,31 @@ Function settings_server_form() As Long
     items(8).x = 1 : items(8).y = 9 : items(8).val = "Password:"
 
     items(1).kind    = VT_FORM_INPUT
-    items(1).x       = 12 : items(1).y      = 1
+    items(1).x       = 12 : items(1).y       = 1
     items(1).wid     = 30 : items(1).max_len = 63
     items(1).val     = cfg.server
     items(1).cpos    = Len(cfg.server)
 
     items(3).kind    = VT_FORM_INPUT
-    items(3).x       = 12 : items(3).y      = 3
+    items(3).x       = 12 : items(3).y       = 3
     items(3).wid     = 8  : items(3).max_len = 5
     items(3).val     = Trim(Str(cfg.port))
     items(3).cpos    = Len(items(3).val)
 
     items(5).kind    = VT_FORM_INPUT
-    items(5).x       = 12 : items(5).y      = 5
+    items(5).x       = 12 : items(5).y       = 5
     items(5).wid     = 30 : items(5).max_len = 50
     items(5).val     = cfg.channel
     items(5).cpos    = Len(cfg.channel)
 
     items(7).kind    = VT_FORM_INPUT
-    items(7).x       = 12 : items(7).y      = 7
+    items(7).x       = 12 : items(7).y       = 7
     items(7).wid     = 20 : items(7).max_len = 30
     items(7).val     = cfg.nick
     items(7).cpos    = Len(cfg.nick)
 
     items(9).kind    = VT_FORM_INPUT
-    items(9).x       = 12 : items(9).y      = 9
+    items(9).x       = 12 : items(9).y       = 9
     items(9).wid     = 30 : items(9).max_len = 64
     items(9).val     = cfg.password
     items(9).cpos    = Len(cfg.password)
@@ -862,7 +863,7 @@ Function settings_server_form() As Long
         vt_tui_window(FORM_X, FORM_Y, FORM_W, FORM_H, " VTIRC Server Settings ", _
                       VT_TUI_WIN_SHADOW)
         vt_tui_form_draw(items(), focused)
-        vt_sleep(16)
+        vt_sleep(IDLE_MS)
 
         Select Case result
         Case VT_FORM_CANCEL, 2
@@ -992,7 +993,7 @@ Function settings_common_form() As Long
         vt_tui_window(CFORM_X, CFORM_Y, CFORM_W, CFORM_H, " VTIRC Settings ", _
                       VT_TUI_WIN_SHADOW)
         vt_tui_form_draw(items(), focused)
-        vt_sleep(16)
+        vt_sleep(IDLE_MS)
 
         Select Case result
         Case VT_FORM_CANCEL, 2
@@ -1800,7 +1801,7 @@ Do
     'vt_view_print
 
     draw_all()
-    vt_sleep(16)
+    vt_sleep(IDLE_MS)
 Loop Until quit_flag
 
 If sock_valid Then irc_disconnect()
