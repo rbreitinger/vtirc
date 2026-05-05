@@ -22,7 +22,7 @@
 - Live user list with one-click PM
 - In-app help — press **F1**
 - Config saved automatically to `.vtirc` next to the executable
-- Paste support (Shift+Ins)
+- Paste support (Shift+Ins / MMB)
 - Single-file executable, no installer
 
 ---
@@ -34,7 +34,7 @@
 | Dependency | Version | Notes |
 |---|---|---|
 | [FreeBASIC](https://www.freebasic.net) | 1.10.1 | Compiler |
-| [libvt](https://github.com/rbreitinger/libvt) | 1.4.0+ | Place `vt/` folder in your FreeBASIC `inc/` folder |
+| [libvt](https://github.com/rbreitinger/libvt) | 1.7.0+ | Place `vt/` folder in your FreeBASIC `inc/` folder |
 
 Clone or download libvt and place the `vt/` directory in your FreeBASIC `inc/` folder.
 
