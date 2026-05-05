@@ -6,8 +6,11 @@
 #Define VT_USE_TUI
 #Include Once "vt/vt.bi"
 
+'IDEAS:
+'1) detect links "http:// and https:// , highlight them and make them clickable, open browser with link
+
 Const VERSION      = "1.4.0"
-Const IDLE_MS      = 50
+Const IDLE_MS      = 25
 Const HISTORY_MAX  = 2000
 Const USER_MAX     = 512
 Const CHAT_TOP_ROW = 2
@@ -104,6 +107,13 @@ Dim Shared wins(WIN_MAX - 1) As irc_window
 Dim Shared win_count         As Long = 1
 Dim Shared active_win        As Long = 0
 
+' command-line history
+Const CMD_HIST_MAX   = 32
+Dim Shared cmd_hist_buf(CMD_HIST_MAX - 1) As String
+Dim Shared cmd_hist_count As Long = 0
+Dim Shared cmd_hist_head  As Long = 0   ' ring head (oldest entry index)
+Dim Shared cmd_hist_pos   As Long = -1  ' -1 = not browsing
+
 ' channel browser: LIST collection state
 Const CHLIST_MAX         = 500
 Dim Shared chlist_active As Byte = 0   ' 1 while LIST is in progress
@@ -158,7 +168,7 @@ Sub scheme_apply()
 
     End Select
 
-    vt_tui_theme (col_fg_body  , col_bg_main, _     ' window body 
+    vt_tui_theme (col_fg_body  , col_bg_main, _    ' window body 
                   VT_WHITE  , VT_BLUE, _           ' title bar
                   col_bar_fg, col_bar_bg, _        ' bar/menu
                   VT_BLACK  , VT_LIGHT_GREY, _     ' button
@@ -344,15 +354,15 @@ Function cfg_load() As Byte
         Dim cfg_key As String = LCase(Left(ln, sep_pos - 1))
         Dim cfg_val As String = Mid(ln, sep_pos + 1)
         Select Case cfg_key
-        Case "server"      : cfg.server      = cfg_val
-        Case "port"        : cfg.port        = Val(cfg_val)
-        Case "channel"     : cfg.channel     = cfg_val
-        Case "nick"        : cfg.nick        = cfg_val
-        Case "password"    : cfg.password    = cfg_val
-        Case "scheme"      : cfg.scheme      = Val(cfg_val)
-        Case "log_enabled" : cfg.log_enabled = Val(cfg_val)
-        Case "log_pm"      : cfg.log_pm      = Val(cfg_val)
-        Case "auto_reconnect" : cfg.auto_reconnect = Val(cfg_val)
+        Case "server"          : cfg.server          = cfg_val
+        Case "port"            : cfg.port            = Val(cfg_val)
+        Case "channel"         : cfg.channel         = cfg_val
+        Case "nick"            : cfg.nick            = cfg_val
+        Case "password"        : cfg.password        = cfg_val
+        Case "scheme"          : cfg.scheme          = Val(cfg_val)
+        Case "log_enabled"     : cfg.log_enabled     = Val(cfg_val)
+        Case "log_pm"          : cfg.log_pm          = Val(cfg_val)
+        Case "auto_reconnect"  : cfg.auto_reconnect  = Val(cfg_val)
         Case "show_timestamps" : cfg.show_timestamps = Val(cfg_val)
         End Select
     Loop
@@ -363,15 +373,15 @@ End Function
 Sub cfg_save()
     Dim f As Long = FreeFile()
     Open cfg_file For Output As #f
-    Print #f, "server="      & cfg.server
-    Print #f, "port="        & cfg.port
-    Print #f, "channel="     & cfg.channel
-    Print #f, "nick="        & cfg.nick
-    Print #f, "password="    & cfg.password
-    Print #f, "scheme="         & cfg.scheme
-    Print #f, "log_enabled="    & cfg.log_enabled
-    Print #f, "log_pm="         & cfg.log_pm
-    Print #f, "auto_reconnect=" & cfg.auto_reconnect
+    Print #f, "server="          & cfg.server
+    Print #f, "port="            & cfg.port
+    Print #f, "channel="         & cfg.channel
+    Print #f, "nick="            & cfg.nick
+    Print #f, "password="        & cfg.password
+    Print #f, "scheme="          & cfg.scheme
+    Print #f, "log_enabled="     & cfg.log_enabled
+    Print #f, "log_pm="          & cfg.log_pm
+    Print #f, "auto_reconnect="  & cfg.auto_reconnect
     Print #f, "show_timestamps=" & cfg.show_timestamps
     Close #f
 End Sub
@@ -768,11 +778,15 @@ Sub help_window()
     help_txt &= "  /nick <n>       Change nickname"      & VT_LF
     help_txt &= "  /names          List channel users"   & VT_LF
     help_txt &= "  /msg <n> [txt]  Open PM window"       & VT_LF
+    help_txt &= "  /me <text>      Send action message"  & VT_LF
     help_txt &= "  /afk [msg]      Set away status"      & VT_LF
     help_txt &= "  /back           Return from AFK"      & VT_LF
     help_txt &= "  /part           Leave active channel" & VT_LF
     help_txt &= "  /join <ch>      Join channel(new win)"& VT_LF
     help_txt &= "  /quit           Disconnect"           & VT_LF
+    help_txt &= ""                                       & VT_LF
+    help_txt &= " Input History"                         & VT_LF
+    help_txt &= "  Up/Down arrows  Browse sent lines"    & VT_LF
     help_txt &= ""                                       & VT_LF
     help_txt &= " Color Input (EGA indexes)"             & VT_LF
     help_txt &= "  ^ 0=blk   ^1=blu   ^2=grn   ^3=cyn"   & VT_LF
@@ -1371,9 +1385,22 @@ Sub irc_handle(raw_ln As String)
     Case "PING"
         irc_send("PONG :" & trail_str)
 
+    ' PRIVMSG handler with CTCP ACTION detection
     Case "PRIVMSG"
-        Dim priv_tgt As String = Trim(prms_str)
-        Dim priv_wi  As Long   = win_find(priv_tgt)
+        Dim priv_tgt  As String = Trim(prms_str)
+        Dim priv_wi   As Long   = win_find(priv_tgt)
+        ' detect CTCP ACTION  (format: Chr(1) & "ACTION text" & Chr(1))
+        Dim is_action  As Byte   = 0
+        Dim action_txt As String
+        If Left(trail_str, 8) = Chr(1) & "ACTION " Then
+            Dim ctcp_end As Long = InStr(2, trail_str, Chr(1))
+            If ctcp_end > 0 Then
+                action_txt = Mid(trail_str, 9, ctcp_end - 9)
+            Else
+                action_txt = Mid(trail_str, 9)
+            End If
+            is_action = 1
+        End If
         If priv_wi >= 0 AndAlso wins(priv_wi).is_pm = 0 Then
             Dim msg_fg As UByte
             If LCase(src_nick) = LCase(cfg.nick) Then
@@ -1381,11 +1408,19 @@ Sub irc_handle(raw_ln As String)
             Else
                 msg_fg = nick_color(src_nick)
             End If
-            win_hist_append(priv_wi, "<" & src_nick & "> " & trail_str, msg_fg)
+            If is_action Then
+                win_hist_append(priv_wi, "* " & src_nick & " " & action_txt, msg_fg)
+            Else
+                win_hist_append(priv_wi, "<" & src_nick & "> " & trail_str, msg_fg)
+            End If
         ElseIf LCase(priv_tgt) = LCase(cfg.nick) Then
             Dim pm_wi As Long = win_open(src_nick, 1)
             If pm_wi >= 0 Then
-                win_hist_append(pm_wi, "<" & src_nick & "> " & trail_str, nick_color(src_nick))
+                If is_action Then
+                    win_hist_append(pm_wi, "* " & src_nick & " " & action_txt, nick_color(src_nick))
+                Else
+                    win_hist_append(pm_wi, "<" & src_nick & "> " & trail_str, nick_color(src_nick))
+                End If
             End If
         End If
 
@@ -2039,9 +2074,40 @@ Do
             win_close(active_win)
         End If
     Else
-        ' -- input form: pass all keys except history navigation keys ----------
+        ' intercept Up/Down for command history before passing to form
         Select Case VT_SCAN(k)
         Case VT_KEY_PGUP, VT_KEY_PGDN, VT_KEY_HOME, VT_KEY_END
+            ' handled in scroll section below
+
+        Case VT_KEY_UP
+            If cmd_hist_count > 0 Then
+                If cmd_hist_pos = -1 Then
+                    cmd_hist_pos = cmd_hist_count - 1
+                ElseIf cmd_hist_pos > 0 Then
+                    cmd_hist_pos -= 1
+                End If
+                Dim up_ridx As Long = (cmd_hist_head + cmd_hist_pos) Mod CMD_HIST_MAX
+                input_form(0).val      = cmd_hist_buf(up_ridx)
+                input_form(0).cpos     = Len(input_form(0).val)
+                input_form(0).view_off = 0
+            End If
+
+        Case VT_KEY_DOWN
+            If cmd_hist_pos >= 0 Then
+                cmd_hist_pos += 1
+                If cmd_hist_pos >= cmd_hist_count Then
+                    cmd_hist_pos = -1
+                    input_form(0).val      = ""
+                    input_form(0).cpos     = 0
+                    input_form(0).view_off = 0
+                Else
+                    Dim dn_ridx As Long = (cmd_hist_head + cmd_hist_pos) Mod CMD_HIST_MAX
+                    input_form(0).val      = cmd_hist_buf(dn_ridx)
+                    input_form(0).cpos     = Len(input_form(0).val)
+                    input_form(0).view_off = 0
+                End If
+            End If
+
         Case Else
             vt_tui_form_handle(input_form(), input_focused, k, VT_FORM_NO_ESC)
         End Select
@@ -2111,6 +2177,18 @@ Do
     ' -- send on Enter --------------------------------------------------------
     Case VT_KEY_ENTER
         If Len(input_form(0).val) > 0 Then
+            ' save to command history ring before processing
+            Dim ch_slot As Long
+            If cmd_hist_count < CMD_HIST_MAX Then
+                ch_slot = (cmd_hist_head + cmd_hist_count) Mod CMD_HIST_MAX
+                cmd_hist_count += 1
+            Else
+                ch_slot = cmd_hist_head
+                cmd_hist_head = (cmd_hist_head + 1) Mod CMD_HIST_MAX
+            End If
+            cmd_hist_buf(ch_slot) = input_form(0).val
+            cmd_hist_pos = -1
+
             If Left(input_form(0).val, 1) = "/" Then
                 Dim cmd_raw  As String = Mid(input_form(0).val, 2)
                 Dim sp_pos   As Long   = InStr(cmd_raw, " ")
@@ -2127,6 +2205,18 @@ Do
                 Select Case cmd_word
                 Case "QUIT"
                     irc_disconnect()
+
+                Case "ME"
+                    If connected AndAlso Len(cmd_arg) > 0 Then
+                        Dim me_wire As String = q3_to_mirc(cmd_arg)
+                        irc_send("PRIVMSG " & wins(active_win).target & " :" & _
+                                 Chr(1) & "ACTION " & me_wire & Chr(1))
+                        win_hist_append(active_win, "* " & cfg.nick & " " & me_wire, col_fg_own)
+                    ElseIf Len(cmd_arg) = 0 Then
+                        hist_append("*** Usage: /me <action text>", VT_BRIGHT_RED)
+                    Else
+                        hist_append("*** Not connected.", VT_BRIGHT_RED)
+                    End If
 
                 Case "NICK"
                     If Len(cmd_arg) > 0 Then irc_send("NICK " & cmd_arg)
