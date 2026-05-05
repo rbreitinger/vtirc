@@ -6,7 +6,7 @@
 #Define VT_USE_TUI
 #Include Once "vt/vt.bi"
 
-Const VERSION      = "1.3.0"
+Const VERSION      = "1.4.0"
 Const IDLE_MS      = 50
 Const HISTORY_MAX  = 2000
 Const USER_MAX     = 512
@@ -17,22 +17,26 @@ Const ROW_INPUT    = 39
 Const ROW_STATUS   = 40
 Const SCREEN_COLS  = 100
 Const SCREEN_ROWS  = 40
+
 ' left user-list pane
 Const PANE_W       = 18             ' pane width in columns
 Const PANE_SEP     = PANE_W + 1     ' = 19, vertical separator column
 Const CHAT_COL     = PANE_W + 2     ' = 20, first chat column
 Const CHAT_WIDE    = SCREEN_COLS - PANE_W - 1  ' = 81, chat display width
+
 ' F2 server settings form
 Const FORM_W       = 46
 Const FORM_H       = 13
 Const FORM_X       = (SCREEN_COLS - FORM_W) \ 2
 Const FORM_Y       = (SCREEN_ROWS - FORM_H) \ 2
+
 ' F3 common settings form
 Const CFORM_W      = 40
 Const CFORM_H      = 15     ' +2 for "Show timestamps" checkbox row
 Const LOG_TAIL_N   = 200    ' lines to replay from log on connect
 Const CFORM_X      = (SCREEN_COLS - CFORM_W) \ 2
 Const CFORM_Y      = (SCREEN_ROWS - CFORM_H) \ 2
+
 ' Window array
 Const WIN_MAX      = 16
 
@@ -95,9 +99,19 @@ Dim Shared pane_lb_st    As vt_tui_listbox_state
 ReDim Shared pane_items(0) As String   ' rebuilt on pane_dirty; sorted alphabetically
 Dim Shared pane_dirty    As Byte = 1
 
+' channel/pm windows
 Dim Shared wins(WIN_MAX - 1) As irc_window
 Dim Shared win_count         As Long = 1
 Dim Shared active_win        As Long = 0
+
+' channel browser: LIST collection state
+Const CHLIST_MAX         = 500
+Dim Shared chlist_active As Byte = 0   ' 1 while LIST is in progress
+Dim Shared chlist_done   As Byte = 0   ' 1 when 323 (end of list) arrives
+Dim Shared chlist_count  As Long = 0
+ReDim Shared chlist_names(CHLIST_MAX - 1)  As String
+ReDim Shared chlist_users(CHLIST_MAX - 1)  As Long
+ReDim Shared chlist_topics(CHLIST_MAX - 1) As String
 
 Declare Sub irc_poll()
 Declare Sub irc_on_drop()
@@ -116,6 +130,7 @@ Declare Sub user_list_rename(win_idx As Long, old_nick As String, new_nick As St
 Declare Sub user_list_echo(win_idx As Long)
 Declare Function irc_strip_colors(s As String) As String
 Declare Function mirc_wordwrap(txt As String, wid As Long) As String
+Declare Sub channel_browser()
 
 ' Close callback
 Function on_close() As Byte
@@ -130,14 +145,17 @@ Sub scheme_apply()
         col_bg_main  = VT_BLACK      : col_fg_body  = VT_LIGHT_GREY
         col_fg_own   = VT_WHITE      : col_fg_other = VT_YELLOW
         col_fg_sys   = VT_GREEN      : col_bar_fg   = VT_BRIGHT_MAGENTA : col_bar_bg = VT_BLUE
+
     Case 2  ' Light
         col_bg_main  = VT_LIGHT_GREY : col_fg_body  = VT_BLACK
         col_fg_own   = VT_BLUE       : col_fg_other = VT_RED
         col_fg_sys   = VT_DARK_GREY  : col_bar_fg   = VT_BLACK  : col_bar_bg = VT_WHITE
+
     Case Else  ' Dark (0, default)
         col_bg_main  = VT_BLACK      : col_fg_body  = VT_LIGHT_GREY
         col_fg_own   = VT_WHITE      : col_fg_other = VT_BRIGHT_CYAN
         col_fg_sys   = VT_DARK_GREY  : col_bar_fg   = VT_CYAN  : col_bar_bg = VT_DARK_GREY
+
     End Select
 
     vt_tui_theme (col_fg_body  , col_bg_main, _     ' window body 
@@ -721,6 +739,7 @@ Sub help_window()
     help_txt &= "  F1          This help"                & VT_LF
     help_txt &= "  F2          Server settings"          & VT_LF
     help_txt &= "  F3          Client settings"          & VT_LF
+    help_txt &= "  F4          Browse channels"          & VT_LF
     help_txt &= "  F10         Disconnect"               & VT_LF
     help_txt &= "  Alt+F4      Quit"                     & VT_LF
     help_txt &= "  Ctrl+Tab    Cycle windows"            & VT_LF
@@ -1466,6 +1485,48 @@ Sub irc_handle(raw_ln As String)
         is_afk  = 0
         afk_msg = ""
         hist_append("*** You are no longer marked as away.", col_fg_sys)
+    
+    Case "322"
+        ' RPL_LIST: prms_str = "yournick #channel usercount"
+        If chlist_active AndAlso chlist_count < CHLIST_MAX Then
+            Dim tok322()  As String
+            Dim tcnt322   As Long = vt_str_split(Trim(prms_str), " ", tok322())
+            If tcnt322 >= 3 Then
+                Dim ch322  As String = tok322(1)
+                Dim cnt322 As Long   = Val(tok322(2))
+                If Len(ch322) > 0 Then
+                    chlist_names(chlist_count)  = ch322
+                    chlist_users(chlist_count)  = cnt322
+                    chlist_topics(chlist_count) = irc_strip_colors(trail_str)
+                    chlist_count += 1
+                End If
+            End If
+        End If
+
+    Case "323"
+        ' RPL_LISTEND
+        chlist_done = 1
+
+    Case "332"
+        ' Topic reply: prms_str = "yournick #channel"  trail_str = topic text
+        Dim ch332       As String
+        Dim last_sp332  As Long = 0
+        Dim pi332       As Long
+        For pi332 = 1 To Len(prms_str)
+            If Mid(prms_str, pi332, 1) = " " Then last_sp332 = pi332
+        Next pi332
+        If last_sp332 > 0 Then
+            ch332 = Mid(prms_str, last_sp332 + 1)
+        Else
+            ch332 = prms_str
+        End If
+        ch332 = Trim(ch332)
+        Dim wi332 As Long = win_find(ch332)
+        If wi332 >= 0 Then
+            win_hist_append(wi332, "*** Topic: " & irc_strip_colors(trail_str), col_fg_sys)
+        Else
+            hist_append("*** Topic for " & ch332 & ": " & irc_strip_colors(trail_str), col_fg_sys)
+        End If
 
     Case "306"
         hist_append("*** You are now marked as away.", col_fg_sys)
@@ -1521,27 +1582,6 @@ Sub irc_handle(raw_ln As String)
             hist_append("*** End of NAMES for " & ch366, col_fg_sys)
         End If
     
-    Case "332"
-        ' Topic reply: prms_str = "yournick #channel"  trail_str = topic text
-        Dim ch332       As String
-        Dim last_sp332  As Long = 0
-        Dim pi332       As Long
-        For pi332 = 1 To Len(prms_str)
-            If Mid(prms_str, pi332, 1) = " " Then last_sp332 = pi332
-        Next pi332
-        If last_sp332 > 0 Then
-            ch332 = Mid(prms_str, last_sp332 + 1)
-        Else
-            ch332 = prms_str
-        End If
-        ch332 = Trim(ch332)
-        Dim wi332 As Long = win_find(ch332)
-        If wi332 >= 0 Then
-            win_hist_append(wi332, "*** Topic: " & irc_strip_colors(trail_str), col_fg_sys)
-        Else
-            hist_append("*** Topic for " & ch332 & ": " & irc_strip_colors(trail_str), col_fg_sys)
-        End If
-
     Case "433"
         hist_append("*** Nickname in use: try /nick <newnick>", VT_BRIGHT_RED)
 
@@ -1557,6 +1597,174 @@ Sub irc_handle(raw_ln As String)
             End Select
         End If
     End Select
+End Sub
+
+' -----------------------------------------------------------------------------
+' F4 -- Channel browser
+' -----------------------------------------------------------------------------
+Sub channel_browser()
+    Const BFW  = 78
+    Const BFH  = 28
+    Const BFX  = (SCREEN_COLS - BFW) \ 2     ' = 11
+    Const BFY  = (SCREEN_ROWS - BFH) \ 2     ' = 6
+    Const BLBX = BFX + 1                      ' listbox left edge
+    Const BLBY = BFY + 3                      ' listbox top (row after header)
+    Const BLBW = BFW - 2                      ' = 76
+    Const BLBH = 20                           ' listbox visible rows
+    Const CH_W  = 22                          ' channel name column width
+    Const CNT_W = 6                           ' user count column width
+    Const TOP_W = BLBW - CH_W - 1 - CNT_W - 1   ' = 46  topic width
+
+    ' -- request channel list ------------------------------------------------
+    chlist_active = 1
+    chlist_done   = 0
+    chlist_count  = 0
+    irc_send("LIST")
+
+    draw_all()
+    vt_tui_theme_default()
+
+    ' -- fetch loop: show progress until 323 or timeout ----------------------
+    Dim t_start As Double = Timer
+    Dim ek      As ULong
+    Do
+        irc_poll()
+        If chlist_done Then Exit Do
+        If Timer - t_start > 15.0 Then Exit Do
+
+        vt_tui_rect_fill(BFX + 1, BFY + 1, BFW - 2, BFH - 2, 32, VT_BLACK, VT_LIGHT_GREY)
+        vt_tui_window(BFX, BFY, BFW, BFH, " Channel Browser ", VT_TUI_WIN_SHADOW)
+        vt_color(VT_BLACK, VT_LIGHT_GREY)
+        vt_locate(BFY + 5, BFX + 3)
+        vt_print("Fetching channel list...  " & chlist_count & " channels received so far.")
+        vt_locate(BFY + 7, BFX + 3)
+        vt_print("Press Esc to cancel.")
+
+        ek = vt_inkey()
+        If VT_SCAN(ek) = VT_KEY_ESC Then
+            chlist_active = 0
+            scheme_apply()
+            Return
+        End If
+        vt_sleep(IDLE_MS)
+    Loop
+    chlist_active = 0
+
+    If chlist_count = 0 Then
+        scheme_apply()
+        hist_append("*** Channel list empty or request timed out.", col_fg_sys)
+        Return
+    End If
+
+    ' -- build listbox items -------------------------------------------------
+    ReDim lb_items(chlist_count - 1) As String
+    Dim bi As Long
+    For bi = 0 To chlist_count - 1
+        Dim ch_col  As String = chlist_names(bi)
+        If Len(ch_col) > CH_W Then ch_col = Left(ch_col, CH_W)
+        ch_col = ch_col & Space(CH_W - Len(ch_col))
+
+        Dim cnt_str As String = Trim(Str(chlist_users(bi)))
+        Dim cnt_col As String = Space(CNT_W - Len(cnt_str)) & cnt_str   ' right-align
+
+        Dim top_col As String = chlist_topics(bi)
+        If Len(top_col) > TOP_W Then top_col = Left(top_col, TOP_W)
+
+        lb_items(bi) = ch_col & " " & cnt_col & " " & top_col
+    Next bi
+
+    ' -- two buttons ---------------------------------------------------------
+    Dim btn_items(1) As vt_tui_form_item
+    Dim btn_focused  As Long = 0
+
+    btn_items(0).kind = VT_FORM_BUTTON
+    btn_items(0).x    = (BFW \ 2) - 10
+    btn_items(0).y    = BFH - 2
+    btn_items(0).val  = "Join"
+    btn_items(0).ret  = 1
+
+    btn_items(1).kind = VT_FORM_BUTTON
+    btn_items(1).x    = (BFW \ 2) + 4
+    btn_items(1).y    = BFH - 2
+    btn_items(1).val  = "Cancel"
+    btn_items(1).ret  = 2
+
+    vt_tui_form_offset(btn_items(), BFX, BFY)
+
+    Dim lb_st As vt_tui_listbox_state
+    lb_st.sel             = 0
+    lb_st.top_item        = 0
+    lb_st.last_click_item = -1
+    lb_st.last_click_time = 0.0
+    lb_st.prev_btns       = 0
+
+    Dim k_cb   As ULong
+    Dim result As Long
+
+    ' -- browser loop --------------------------------------------------------
+    Do
+        irc_poll()
+        k_cb   = vt_inkey()
+        result = vt_tui_form_handle(btn_items(), btn_focused, k_cb, VT_FORM_NO_ESC)
+        Dim lb_ret As Long = vt_tui_listbox_handle(BLBX, BLBY, BLBW, BLBH, _
+                                                    lb_items(), lb_st, k_cb)
+        If lb_ret >= 0 Then result = 1   ' double-click in listbox = join
+
+        If VT_SCAN(k_cb) = VT_KEY_ESC OrElse result = 2 Then Exit Do
+
+        If result = 1 Then
+            Dim sel_ch As String = chlist_names(lb_st.sel)
+            If Len(sel_ch) > 0 Then
+                Dim jn_wi As Long = win_find(sel_ch)
+                If jn_wi < 0 Then
+                    jn_wi = win_open(sel_ch, 0)
+                    If jn_wi >= 0 Then
+                        log_load_tail(jn_wi, LOG_TAIL_N)
+                        If InStr(LCase(cfg.channel), LCase(sel_ch)) = 0 Then
+                            If Len(cfg.channel) > 0 Then cfg.channel &= ","
+                            cfg.channel &= sel_ch
+                            cfg_save()
+                        End If
+                    End If
+                End If
+                If jn_wi >= 0 Then
+                    active_win              = jn_wi
+                    wins(active_win).unread = 0
+                    pane_dirty              = 1
+                End If
+                irc_send("JOIN " & sel_ch)
+            End If
+            Exit Do
+        End If
+
+        ' -- draw ------------------------------------------------------------
+        vt_tui_rect_fill(BFX + 1, BFY + 1, BFW - 2, BFH - 2, 32, VT_BLACK, VT_LIGHT_GREY)
+        vt_tui_window(BFX, BFY, BFW, BFH, _
+                      " Channel Browser  " & chlist_count & " channels  Enter/DblClick=Join ", _
+                      VT_TUI_WIN_SHADOW)
+
+        ' column header
+        vt_color(VT_DARK_GREY, VT_LIGHT_GREY)
+        vt_locate(BFY + 2, BLBX)
+        vt_print(Left(vt_str_pad_right("Channel", CH_W, " ") & " " & _
+                      vt_str_pad_right("Users", CNT_W, " ") & " " & "Topic", BLBW))
+
+        ' topic of selected item
+        Dim sel_idx   As Long  = lb_st.sel
+        If sel_idx < 0 Then sel_idx = 0
+        If sel_idx >= chlist_count Then sel_idx = chlist_count - 1
+        Dim sel_topic As String = chlist_topics(sel_idx)
+        If Len(sel_topic) > BFW - 4 Then sel_topic = Left(sel_topic, BFW - 4)
+        vt_color(VT_BLACK, VT_LIGHT_GREY)
+        vt_locate(BFY + BFH - 4, BFX + 2)
+        vt_print(vt_str_pad_right(sel_topic, BFW - 4, " "))
+
+        vt_tui_listbox_draw(BLBX, BLBY, BLBW, BLBH, lb_items(), lb_st)
+        vt_tui_form_draw(btn_items(), btn_focused)
+        vt_sleep(IDLE_MS)
+    Loop
+
+    scheme_apply()
 End Sub
 
 ' -----------------------------------------------------------------------------
@@ -1879,14 +2087,24 @@ Do
     ' -- function keys --------------------------------------------------------
     Case VT_KEY_F1
         help_window()
+
     Case VT_KEY_F2
         If connected Then
             vt_tui_dialog("Settings", "Disconnect first before changing server settings.", VT_DLG_OK)
         Else
             If settings_server_form() = 1 Then irc_connect()
         End If
+
     Case VT_KEY_F3
         settings_common_form()
+
+    Case VT_KEY_F4
+        If connected Then
+            channel_browser()
+        Else
+            hist_append("*** Connect to a server first to browse channels.", VT_BRIGHT_RED)
+        End If
+
     Case VT_KEY_F10
         If sock_valid Then irc_disconnect()
 
