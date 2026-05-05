@@ -6,9 +6,10 @@
 #Define VT_USE_TUI
 #Include Once "vt/vt.bi"
 
-Const VERSION      = "1.2.0"
+Const VERSION      = "1.3.0"
 Const IDLE_MS      = 50
 Const HISTORY_MAX  = 2000
+Const USER_MAX     = 512
 Const CHAT_TOP_ROW = 2
 Const CHAT_BOT_ROW = 37
 Const CHAT_ROWS    = 36
@@ -62,6 +63,9 @@ Type irc_window
     hist_head                As Long      ' ring buffer head (oldest entry index)
     top_line                 As Long      ' scroll offset (0 = live bottom)
     new_msgs                 As Byte      ' 1 when history grows while scrolled up
+    user_list(USER_MAX - 1)  As String    ' per-channel user list
+    user_count               As Long      ' number of tracked users
+    names_receiving          As Byte      ' 1 while collecting 353 replies
 End Type
 
 Dim Shared cfg           As irc_config
@@ -86,11 +90,6 @@ Dim Shared is_reconnect      As Byte   = 0
 Dim Shared As Ubyte col_bg_main, col_fg_body, col_fg_own, col_fg_other, _
                     col_fg_sys, col_bar_fg, col_bar_bg
 
-Const USER_MAX = 512
-Dim Shared user_list(USER_MAX - 1) As String
-Dim Shared user_count              As Long = 0
-Dim Shared names_receiving         As Byte = 0
-
 ' pane user-list state
 Dim Shared pane_lb_st    As vt_tui_listbox_state
 ReDim Shared pane_items(0) As String   ' rebuilt on pane_dirty; sorted alphabetically
@@ -106,9 +105,15 @@ Declare Function win_find(tgt As String) As Long
 Declare Function win_open(tgt As String, pm As Byte) As Long
 Declare Sub win_hist_append(win_idx As Long, txt As String, col_fg As UByte)
 Declare Sub win_hist_raw(win_idx As Long, txt As String, col_fg As UByte)
-Declare Sub win_close_pm(win_idx As Long)
-Declare Sub log_load_tail(n As Long)
+Declare Sub win_close(win_idx As Long)
+Declare Function user_in_win(win_idx As Long, nick As String) As Byte
+Declare Sub log_load_tail(win_idx As Long, n As Long)
 Declare Sub pane_refresh()
+Declare Sub user_list_clear(win_idx As Long)
+Declare Sub user_list_add(win_idx As Long, nick As String)
+Declare Sub user_list_remove(win_idx As Long, nick As String)
+Declare Sub user_list_rename(win_idx As Long, old_nick As String, new_nick As String)
+Declare Sub user_list_echo(win_idx As Long)
 Declare Function irc_strip_colors(s As String) As String
 Declare Function mirc_wordwrap(txt As String, wid As Long) As String
 
@@ -157,10 +162,10 @@ Function nick_color(nick_str As String) As UByte
 End Function
 
 ' Logging
-Sub log_write(txt As String)
+Sub log_write(ch_target As String, txt As String)
     If cfg.log_enabled = 0 Then Exit Sub
-    If Len(cfg.server) = 0 OrElse Len(cfg.channel) = 0 Then Exit Sub
-    Dim ch_safe  As String = cfg.channel
+    If Len(cfg.server) = 0 OrElse Len(ch_target) = 0 Then Exit Sub
+    Dim ch_safe  As String = ch_target
     If Left(ch_safe, 1) = "#" Then ch_safe = Mid(ch_safe, 2)
     Dim log_path As String = ExePath() & "/" & cfg.server & "_" & ch_safe & ".log"
     Dim f        As Long   = FreeFile()
@@ -184,8 +189,8 @@ End Sub
 ' -----------------------------------------------------------------------------
 Sub win_hist_append(win_idx As Long, txt As String, col_fg As UByte)
     If win_idx < 0 OrElse win_idx >= win_count Then Exit Sub
-    If win_idx = 0 Then
-        log_write(irc_strip_colors(txt))
+    If wins(win_idx).is_pm = 0 Then
+        If cfg.log_enabled Then log_write(wins(win_idx).target, irc_strip_colors(txt))
     ElseIf cfg.log_pm AndAlso wins(win_idx).is_pm Then
         log_write_pm(wins(win_idx).target, irc_strip_colors(txt))
     End If
@@ -217,6 +222,7 @@ Sub win_hist_append(win_idx As Long, txt As String, col_fg As UByte)
 End Sub
 
 Sub hist_append(txt As String, col_fg As UByte)
+    If win_count = 0 Then Return
     win_hist_append(0, txt, col_fg)
 End Sub
 
@@ -252,10 +258,12 @@ End Sub
 ' Only runs when log_enabled=1 (log was being written) and the file exists.
 ' Lines are inserted raw (no timestamp re-added, no re-logging).
 ' -----------------------------------------------------------------------------
-Sub log_load_tail(n As Long)
+Sub log_load_tail(win_idx As Long, n As Long)
     If cfg.log_enabled = 0 Then Exit Sub
-    If Len(cfg.server) = 0 OrElse Len(cfg.channel) = 0 Then Exit Sub
-    Dim ch_safe  As String = cfg.channel
+    If win_idx < 0 OrElse win_idx >= win_count Then Exit Sub
+    If wins(win_idx).is_pm Then Exit Sub
+    If Len(cfg.server) = 0 OrElse Len(wins(win_idx).target) = 0 Then Exit Sub
+    Dim ch_safe  As String = wins(win_idx).target
     If Left(ch_safe, 1) = "#" Then ch_safe = Mid(ch_safe, 2)
     Dim log_path As String = ExePath() & "/" & cfg.server & "_" & ch_safe & ".log"
     If vt_file_exists(log_path) = 0 Then Exit Sub
@@ -280,12 +288,12 @@ Sub log_load_tail(n As Long)
     If ring_cnt = 0 Then Exit Sub
 
     Dim ring_start As Long = IIf(ring_cnt < n, 0, ring_head)
-    win_hist_raw(0, "--- Replaying last " & ring_cnt & " log lines ---", col_fg_sys)
+    win_hist_raw(win_idx, "--- Replaying last " & ring_cnt & " log lines ---", col_fg_sys)
     Dim i As Long
     For i = 0 To ring_cnt - 1
-        win_hist_raw(0, tail_lines((ring_start + i) Mod n), VT_DARK_GREY)
+        win_hist_raw(win_idx, tail_lines((ring_start + i) Mod n), VT_DARK_GREY)
     Next i
-    win_hist_raw(0, "--- End of log ---", col_fg_sys)
+    win_hist_raw(win_idx, "--- End of log ---", col_fg_sys)
 End Sub
 
 ' -----------------------------------------------------------------------------
@@ -356,21 +364,22 @@ End Sub
 ' -----------------------------------------------------------------------------
 Sub pane_refresh()
     pane_dirty = 0
-    If user_count = 0 Then
+    Dim uc As Long = wins(active_win).user_count
+    If uc = 0 Then
         ReDim pane_items(0)
         pane_items(0) = ""
         pane_lb_st.sel      = 0
         pane_lb_st.top_item = 0
         Return
     End If
-    ReDim pane_items(user_count - 1)
+    ReDim pane_items(uc - 1)
     Dim i As Long
-    For i = 0 To user_count - 1
-        pane_items(i) = user_list(i)
+    For i = 0 To uc - 1
+        pane_items(i) = wins(active_win).user_list(i)
     Next i
     vt_sort(pane_items(), VT_ASCENDING)
-    If pane_lb_st.sel >= user_count Then pane_lb_st.sel = user_count - 1
-    If pane_lb_st.sel < 0           Then pane_lb_st.sel = 0
+    If pane_lb_st.sel >= uc Then pane_lb_st.sel = uc - 1
+    If pane_lb_st.sel < 0   Then pane_lb_st.sel = 0
 End Sub
 
 ' -----------------------------------------------------------------------------
@@ -624,9 +633,9 @@ Sub draw_status()
     Dim hint     As String
     Dim uw_i     As Long
     Dim pm_alert As String = ""
-    For uw_i = 1 To win_count - 1
-        If wins(uw_i).unread Then
-            If Len(pm_alert) = 0 Then pm_alert = " [PM:"
+    For uw_i = 0 To win_count - 1
+        If uw_i <> active_win AndAlso wins(uw_i).unread Then
+            If Len(pm_alert) = 0 Then pm_alert = " [Unread:"
             pm_alert &= " " & wins(uw_i).target
         End If
     Next uw_i
@@ -674,7 +683,7 @@ Sub draw_pane()
                      32, col_fg_body, col_bg_main)
 
     ' listbox (rows 2..37, height = CHAT_ROWS)
-    If user_count > 0 Then
+    If wins(active_win).user_count > 0 Then
         vt_tui_listbox_draw(1, CHAT_TOP_ROW, PANE_W, ROW_STATUS - 1, pane_items(), pane_lb_st)
     Else
         vt_color(col_fg_sys, col_bg_main)
@@ -716,6 +725,7 @@ Sub help_window()
     help_txt &= "  Alt+F4      Quit"                     & VT_LF
     help_txt &= "  Ctrl+Tab    Cycle windows"            & VT_LF
     help_txt &= "  Ctrl+W      Close PM window"          & VT_LF
+    help_txt &= "   Note: use /part for channels"        & VT_LF
     help_txt &= ""                                       & VT_LF
     help_txt &= " Scrolling"                             & VT_LF
     help_txt &= "  PgUp/PgDn/Wheel  Scroll history"      & VT_LF
@@ -723,6 +733,8 @@ Sub help_window()
     help_txt &= "  End              Jump to newest"      & VT_LF
     help_txt &= ""                                       & VT_LF
     help_txt &= " User List (left pane)"                 & VT_LF
+    help_txt &= "  Shows users in the active channel"    & VT_LF
+    help_txt &= "  (Empty when active window is a PM)"   & VT_LF
     help_txt &= "  Click nick to select"                 & VT_LF
     help_txt &= "  Double-click to open PM"              & VT_LF
     help_txt &= ""                                       & VT_LF
@@ -734,15 +746,14 @@ Sub help_window()
     help_txt &= "  MMB in chat line or SHIFT+INS"        & VT_LF
     help_txt &= ""                                       & VT_LF
     help_txt &= " Commands"                              & VT_LF
-    help_txt &= "  /nick <n>        Change nickname"     & VT_LF
-    help_txt &= "  /names           List channel users"  & VT_LF
-    help_txt &= "  /msg <n> [txt]   Open PM window"      & VT_LF
-    help_txt &= "  /afk [msg]       Set away status"     & VT_LF
-    help_txt &= "  /back            Return from AFK"     & VT_LF
-    help_txt &= "  /part            Leave channel"       & VT_LF    
-    help_txt &= "  /join <ch>       Join channel"        & VT_LF
-    help_txt &= "  Note:            Only 1 Channel yet"  & VT_LF
-    help_txt &= "  /quit            Disconnect"          & VT_LF
+    help_txt &= "  /nick <n>       Change nickname"      & VT_LF
+    help_txt &= "  /names          List channel users"   & VT_LF
+    help_txt &= "  /msg <n> [txt]  Open PM window"       & VT_LF
+    help_txt &= "  /afk [msg]      Set away status"      & VT_LF
+    help_txt &= "  /back           Return from AFK"      & VT_LF
+    help_txt &= "  /part           Leave active channel" & VT_LF
+    help_txt &= "  /join <ch>      Join channel(new win)"& VT_LF
+    help_txt &= "  /quit           Disconnect"           & VT_LF
     help_txt &= ""                                       & VT_LF
     help_txt &= " Color Input (EGA indexes)"             & VT_LF
     help_txt &= "  ^ 0=blk   ^1=blu   ^2=grn   ^3=cyn"   & VT_LF
@@ -770,6 +781,7 @@ Sub help_window()
     Dim result As Long
 
     draw_all()
+    vt_tui_theme_default()
 
     Do
         irc_poll()
@@ -786,6 +798,7 @@ Sub help_window()
         vt_tui_form_draw(hlp_items(), hlp_focused)
         vt_sleep(IDLE_MS)
     Loop
+    scheme_apply()
 End Sub
 
 ' -----------------------------------------------------------------------------
@@ -808,7 +821,7 @@ Function settings_server_form() As Long
     Next li
     items(0).x = 1 : items(0).y = 1 : items(0).val = "Server:"
     items(2).x = 1 : items(2).y = 3 : items(2).val = "Port:"
-    items(4).x = 1 : items(4).y = 5 : items(4).val = "Channel:"
+    items(4).x = 1 : items(4).y = 5 : items(4).val = "Channels:"
     items(6).x = 1 : items(6).y = 7 : items(6).val = "Nick:"
     items(8).x = 1 : items(8).y = 9 : items(8).val = "Password:"
 
@@ -826,7 +839,7 @@ Function settings_server_form() As Long
 
     items(5).kind    = VT_FORM_INPUT
     items(5).x       = 12 : items(5).y       = 5
-    items(5).wid     = 30 : items(5).max_len = 50
+    items(5).wid     = 30 : items(5).max_len = 200
     items(5).val     = cfg.channel
     items(5).cpos    = Len(cfg.channel)
 
@@ -854,7 +867,7 @@ Function settings_server_form() As Long
 
     vt_tui_form_offset(items(), FORM_X, FORM_Y)
     draw_all()
-
+    vt_tui_theme_default()
     Do
         k      = vt_inkey()
         result = vt_tui_form_handle(items(), focused, k)
@@ -867,6 +880,7 @@ Function settings_server_form() As Long
 
         Select Case result
         Case VT_FORM_CANCEL, 2
+            scheme_apply()
             Return 0
         Case 1
             cfg.server   = Trim(items(1).val)
@@ -876,10 +890,11 @@ Function settings_server_form() As Long
             cfg.nick     = Trim(items(7).val)
             cfg.password = items(9).val
             cfg_save()
+            scheme_apply()
             Return 1
         End Select
     Loop
-
+    scheme_apply()
     Return 0
 End Function
 
@@ -983,6 +998,7 @@ Function settings_common_form() As Long
 
     vt_tui_form_offset(items(), CFORM_X, CFORM_Y)
     draw_all()
+    vt_tui_theme_default()
 
     Do
         irc_poll()
@@ -997,6 +1013,7 @@ Function settings_common_form() As Long
 
         Select Case result
         Case VT_FORM_CANCEL, 2
+            scheme_apply()
             Return 0
         Case 1
             If items(1).checked Then cfg.scheme = 0
@@ -1022,7 +1039,7 @@ Function settings_common_form() As Long
             Return 1
         End Select
     Loop
-
+    scheme_apply()
     Return 0
 End Function
 
@@ -1159,12 +1176,12 @@ End Function
 ' -----------------------------------------------------------------------------
 ' User list  (sorted snapshot rebuilt via pane_refresh on pane_dirty)
 ' -----------------------------------------------------------------------------
-Sub user_list_clear()
-    user_count  = 0
-    pane_dirty  = 1
+Sub user_list_clear(win_idx As Long)
+    wins(win_idx).user_count = 0
+    If win_idx = active_win Then pane_dirty = 1
 End Sub
 
-Sub user_list_add(nick As String)
+Sub user_list_add(win_idx As Long, nick As String)
     Dim n As String = nick
     Do While Len(n) > 0
         Select Case Left(n, 1)
@@ -1176,62 +1193,70 @@ Sub user_list_add(nick As String)
     Loop
     If Len(n) = 0 Then Return
     Dim i As Long
-    For i = 0 To user_count - 1
-        If LCase(user_list(i)) = LCase(n) Then Return
+    For i = 0 To wins(win_idx).user_count - 1
+        If LCase(wins(win_idx).user_list(i)) = LCase(n) Then Return
     Next i
-    If user_count >= USER_MAX Then Return
-    user_list(user_count) = n
-    user_count += 1
-    pane_dirty  = 1
+    If wins(win_idx).user_count >= USER_MAX Then Return
+    wins(win_idx).user_list(wins(win_idx).user_count) = n
+    wins(win_idx).user_count += 1
+    If win_idx = active_win Then pane_dirty = 1
 End Sub
 
-Sub user_list_remove(nick As String)
+Sub user_list_remove(win_idx As Long, nick As String)
     Dim i As Long
-    For i = 0 To user_count - 1
-        If LCase(user_list(i)) = LCase(nick) Then
+    For i = 0 To wins(win_idx).user_count - 1
+        If LCase(wins(win_idx).user_list(i)) = LCase(nick) Then
             Dim j As Long
-            For j = i To user_count - 2
-                user_list(j) = user_list(j + 1)
+            For j = i To wins(win_idx).user_count - 2
+                wins(win_idx).user_list(j) = wins(win_idx).user_list(j + 1)
             Next j
-            user_list(user_count - 1) = ""
-            user_count -= 1
-            pane_dirty  = 1
+            wins(win_idx).user_list(wins(win_idx).user_count - 1) = ""
+            wins(win_idx).user_count -= 1
+            If win_idx = active_win Then pane_dirty = 1
             Return
         End If
     Next i
 End Sub
 
-Sub user_list_rename(old_nick As String, new_nick As String)
+Sub user_list_rename(win_idx As Long, old_nick As String, new_nick As String)
     Dim i As Long
-    For i = 0 To user_count - 1
-        If LCase(user_list(i)) = LCase(old_nick) Then
-            user_list(i) = new_nick
-            pane_dirty   = 1
+    For i = 0 To wins(win_idx).user_count - 1
+        If LCase(wins(win_idx).user_list(i)) = LCase(old_nick) Then
+            wins(win_idx).user_list(i) = new_nick
+            If win_idx = active_win Then pane_dirty = 1
             Return
         End If
     Next i
 End Sub
 
-Sub user_list_echo()
-    If user_count = 0 Then
-        hist_append("*** No users tracked for " & cfg.channel, col_fg_sys)
+Sub user_list_echo(win_idx As Long)
+    If wins(win_idx).user_count = 0 Then
+        win_hist_append(win_idx, "*** No users tracked for " & wins(win_idx).target, col_fg_sys)
         Return
     End If
-    hist_append("*** " & user_count & " users in " & cfg.channel & ":", col_fg_sys)
-    Dim ln As String
-    Dim i  As Long
-    For i = 0 To user_count - 1
-        Dim entry As String = user_list(i)
+    win_hist_append(win_idx, "*** " & wins(win_idx).user_count & " users in " & wins(win_idx).target & ":", col_fg_sys)
+    Dim ln  As String
+    Dim i   As Long
+    For i = 0 To wins(win_idx).user_count - 1
+        Dim entry As String = wins(win_idx).user_list(i)
         If Len(ln) + 1 + Len(entry) > SCREEN_COLS - 4 Then
-            hist_append("  " & ln, col_fg_sys)
+            win_hist_append(win_idx, "  " & ln, col_fg_sys)
             ln = entry
         Else
             If Len(ln) > 0 Then ln &= " "
             ln &= entry
         End If
     Next i
-    If Len(ln) > 0 Then hist_append("  " & ln, col_fg_sys)
+    If Len(ln) > 0 Then win_hist_append(win_idx, "  " & ln, col_fg_sys)
 End Sub
+
+Function user_in_win(win_idx As Long, nick As String) As Byte
+    Dim i As Long
+    For i = 0 To wins(win_idx).user_count - 1
+        If LCase(wins(win_idx).user_list(i)) = LCase(nick) Then Return 1
+    Next i
+    Return 0
+End Function
 
 ' -----------------------------------------------------------------------------
 ' Window array helpers
@@ -1248,33 +1273,66 @@ Function win_open(tgt As String, pm As Byte) As Long
     Dim idx As Long = win_find(tgt)
     If idx >= 0 Then Return idx
     If win_count >= WIN_MAX Then Return -1
-    idx = win_count
-    wins(idx).target     = tgt
-    wins(idx).is_pm      = pm
-    wins(idx).unread     = 0
-    wins(idx).hist_count = 0
-    wins(idx).hist_head  = 0
-    wins(idx).top_line   = 0
-    wins(idx).new_msgs   = 0
+    If pm = 0 Then
+        ' Channel window: insert before the first PM window
+        Dim insert_at As Long = win_count
+        Dim si        As Long
+        For si = 0 To win_count - 1
+            If wins(si).is_pm Then
+                insert_at = si
+                Exit For
+            End If
+        Next si
+        ' Shift existing windows right to make room
+        For si = win_count - 1 To insert_at Step -1
+            wins(si + 1) = wins(si)
+        Next si
+        ' Adjust active_win if it sits at or after the insertion point
+        If active_win >= insert_at Then active_win += 1
+        idx = insert_at
+    Else
+        ' PM window: append at end
+        idx = win_count
+    End If
+    wins(idx).target          = tgt
+    wins(idx).is_pm           = pm
+    wins(idx).unread          = 0
+    wins(idx).hist_count      = 0
+    wins(idx).hist_head       = 0
+    wins(idx).top_line        = 0
+    wins(idx).new_msgs        = 0
+    wins(idx).user_count      = 0
+    wins(idx).names_receiving = 0
     win_count += 1
     Return idx
 End Function
 
-Sub win_close_pm(win_idx As Long)
-    If win_idx <= 0 OrElse win_idx >= win_count Then Exit Sub
+Sub win_close(win_idx As Long)
+    If win_count <= 1 Then
+        win_hist_append(0, "*** Cannot close the last window. Use /part to leave a channel.", VT_BRIGHT_RED)
+        Exit Sub
+    End If
+    If win_idx < 0 OrElse win_idx >= win_count Then Exit Sub
     Dim i As Long
     For i = win_idx To win_count - 2
         wins(i) = wins(i + 1)
     Next i
-    wins(win_count - 1).target     = ""
-    wins(win_count - 1).is_pm      = 0
-    wins(win_count - 1).unread     = 0
-    wins(win_count - 1).hist_count = 0
-    wins(win_count - 1).hist_head  = 0
-    wins(win_count - 1).top_line   = 0
-    wins(win_count - 1).new_msgs   = 0
+    ' Clear the now-vacated slot
+    wins(win_count - 1).target          = ""
+    wins(win_count - 1).is_pm           = 0
+    wins(win_count - 1).unread          = 0
+    wins(win_count - 1).hist_count      = 0
+    wins(win_count - 1).hist_head       = 0
+    wins(win_count - 1).top_line        = 0
+    wins(win_count - 1).new_msgs        = 0
+    wins(win_count - 1).user_count      = 0
+    wins(win_count - 1).names_receiving = 0
     win_count -= 1
+    ' Adjust active_win
+    If active_win > win_idx Then active_win -= 1
     If active_win >= win_count Then active_win = win_count - 1
+    If active_win < 0 Then active_win = 0
+    pane_dirty = 1
 End Sub
 
 ' -----------------------------------------------------------------------------
@@ -1295,16 +1353,17 @@ Sub irc_handle(raw_ln As String)
         irc_send("PONG :" & trail_str)
 
     Case "PRIVMSG"
-        Dim priv_tgt As String = LCase(Trim(prms_str))
-        If priv_tgt = LCase(cfg.channel) Then
+        Dim priv_tgt As String = Trim(prms_str)
+        Dim priv_wi  As Long   = win_find(priv_tgt)
+        If priv_wi >= 0 AndAlso wins(priv_wi).is_pm = 0 Then
             Dim msg_fg As UByte
             If LCase(src_nick) = LCase(cfg.nick) Then
                 msg_fg = col_fg_own
             Else
                 msg_fg = nick_color(src_nick)
             End If
-            win_hist_append(0, "<" & src_nick & "> " & trail_str, msg_fg)
-        ElseIf priv_tgt = LCase(cfg.nick) Then
+            win_hist_append(priv_wi, "<" & src_nick & "> " & trail_str, msg_fg)
+        ElseIf LCase(priv_tgt) = LCase(cfg.nick) Then
             Dim pm_wi As Long = win_open(src_nick, 1)
             If pm_wi >= 0 Then
                 win_hist_append(pm_wi, "<" & src_nick & "> " & trail_str, nick_color(src_nick))
@@ -1316,52 +1375,92 @@ Sub irc_handle(raw_ln As String)
         Dim notice_tgt  As String = Trim(prms_str)
         Dim notice_txt  As String = irc_strip_colors(trail_str)
         Dim notice_line As String
-        If LCase(notice_tgt) = LCase(cfg.channel) Then
+        Dim notice_wi   As Long   = win_find(notice_tgt)
+        If notice_wi >= 0 AndAlso wins(notice_wi).is_pm = 0 Then
             notice_line = "-" & notice_src & ":" & notice_tgt & "- " & notice_txt
+            win_hist_append(notice_wi, notice_line, VT_YELLOW)
         Else
             notice_line = "-" & notice_src & "- " & notice_txt
+            hist_append(notice_line, VT_YELLOW)
         End If
-        hist_append(notice_line, VT_YELLOW)
 
     Case "JOIN"
         Dim jch As String = trail_str
         If jch = "" Then jch = prms_str
-        hist_append("*** " & src_nick & " has joined " & jch, col_fg_sys)
-        If LCase(jch) = LCase(cfg.channel) Then user_list_add(src_nick)
+        jch = Trim(jch)
+        Dim join_wi As Long = win_find(jch)
+        If join_wi >= 0 Then
+            win_hist_append(join_wi, "*** " & src_nick & " has joined " & jch, col_fg_sys)
+            user_list_add(join_wi, src_nick)
+        Else
+            hist_append("*** " & src_nick & " has joined " & jch, col_fg_sys)
+        End If
 
     Case "PART"
-        hist_append("*** " & src_nick & " has left " & cfg.channel, col_fg_sys)
-        user_list_remove(src_nick)
+        Dim part_ch As String = Trim(prms_str)
+        If Len(part_ch) = 0 Then part_ch = Trim(trail_str)
+        Dim part_wi As Long = win_find(part_ch)
+        If part_wi >= 0 Then
+            win_hist_append(part_wi, "*** " & src_nick & " has left " & part_ch, col_fg_sys)
+            user_list_remove(part_wi, src_nick)
+        Else
+            hist_append("*** " & src_nick & " has left " & part_ch, col_fg_sys)
+        End If
 
     Case "QUIT"
-        hist_append("*** " & src_nick & " has quit (" & irc_strip_colors(trail_str) & ")", col_fg_sys)
-        user_list_remove(src_nick)
+        Dim quit_msg As String = irc_strip_colors(trail_str)
+        Dim qwi      As Long
+        For qwi = 0 To win_count - 1
+            If wins(qwi).is_pm = 0 Then
+                If user_in_win(qwi, src_nick) Then
+                    win_hist_append(qwi, "*** " & src_nick & " has quit (" & quit_msg & ")", col_fg_sys)
+                    user_list_remove(qwi, src_nick)
+                End If
+            Else
+                If LCase(wins(qwi).target) = LCase(src_nick) Then
+                    win_hist_append(qwi, "*** " & src_nick & " has quit (" & quit_msg & ")", col_fg_sys)
+                End If
+            End If
+        Next qwi
 
     Case "NICK"
         Dim new_nick As String = irc_strip_colors(trail_str)
-        If LCase(src_nick) = LCase(cfg.nick) Then
+        Dim is_self  As Byte   = IIf(LCase(src_nick) = LCase(cfg.nick), 1, 0)
+        If is_self Then
             cfg.nick = new_nick
             hist_append("*** You are now known as " & new_nick, col_fg_sys)
-        Else
-            hist_append("*** " & src_nick & " is now known as " & new_nick, col_fg_sys)
         End If
-        user_list_rename(src_nick, new_nick)
-        Dim wn As Long
-        For wn = 1 To win_count - 1
-            If wins(wn).is_pm AndAlso LCase(wins(wn).target) = LCase(src_nick) Then
-                wins(wn).target = new_nick
-                win_hist_append(wn, "*** " & src_nick & " is now known as " & new_nick, col_fg_sys)
+        Dim nwi As Long
+        For nwi = 0 To win_count - 1
+            If wins(nwi).is_pm = 0 Then
+                If user_in_win(nwi, src_nick) Then
+                    user_list_rename(nwi, src_nick, new_nick)
+                    If is_self = 0 Then
+                        win_hist_append(nwi, "*** " & src_nick & " is now known as " & new_nick, col_fg_sys)
+                    End If
+                End If
+            Else
+                If LCase(wins(nwi).target) = LCase(src_nick) Then
+                    wins(nwi).target = new_nick
+                    win_hist_append(nwi, "*** " & src_nick & " is now known as " & new_nick, col_fg_sys)
+                End If
             End If
-        Next wn
+        Next nwi
 
     Case "001"
         hist_append("*** " & irc_strip_colors(trail_str), col_fg_sys)
         connected = 1
-        wins(0).target = cfg.channel
-        wins(0).is_pm  = 0
-        user_list_clear()
-        names_receiving = 0
-        irc_send("JOIN " & cfg.channel)
+        ' Send JOIN for every channel window that looks like a real channel
+        Dim ch001_wi As Long
+        For ch001_wi = 0 To win_count - 1
+            If wins(ch001_wi).is_pm = 0 Then
+                user_list_clear(ch001_wi)
+                If Left(wins(ch001_wi).target, 1) = "#" OrElse _
+                   Left(wins(ch001_wi).target, 1) = "&" Then
+                    irc_send("JOIN " & wins(ch001_wi).target)
+                End If
+            End If
+        Next ch001_wi
 
     Case "305"
         is_afk  = 0
@@ -1372,20 +1471,76 @@ Sub irc_handle(raw_ln As String)
         hist_append("*** You are now marked as away.", col_fg_sys)
 
     Case "353"
-        If names_receiving = 0 Then
-            user_list_clear()
-            names_receiving = 1
+        ' Extract channel: last space-delimited token in prms_str
+        ' prms_str format is e.g. "mynick = #channel" or "mynick * #channel"
+        Dim ch353     As String
+        Dim last_sp353 As Long = 0
+        Dim pi353     As Long
+        For pi353 = 1 To Len(prms_str)
+            If Mid(prms_str, pi353, 1) = " " Then last_sp353 = pi353
+        Next pi353
+        If last_sp353 > 0 Then
+            ch353 = Mid(prms_str, last_sp353 + 1)
+        Else
+            ch353 = prms_str
         End If
-        Dim nk_parts() As String
-        Dim nk_count   As Long = vt_str_split(trail_str, " ", nk_parts())
-        Dim ni         As Long
-        For ni = 0 To nk_count - 1
-            If Len(nk_parts(ni)) > 0 Then user_list_add(nk_parts(ni))
-        Next ni
+        ch353 = Trim(ch353)
+        Dim wi353 As Long = win_find(ch353)
+        If wi353 >= 0 Then
+            If wins(wi353).names_receiving = 0 Then
+                user_list_clear(wi353)
+                wins(wi353).names_receiving = 1
+            End If
+            Dim nk_parts353() As String
+            Dim nk_count353   As Long = vt_str_split(trail_str, " ", nk_parts353())
+            Dim ni353         As Long
+            For ni353 = 0 To nk_count353 - 1
+                If Len(nk_parts353(ni353)) > 0 Then user_list_add(wi353, nk_parts353(ni353))
+            Next ni353
+        End If
 
     Case "366"
-        names_receiving = 0
-        hist_append("*** " & user_count & " users in " & cfg.channel, col_fg_sys)
+        ' Extract channel: last space-delimited token in prms_str
+        Dim ch366      As String
+        Dim last_sp366 As Long = 0
+        Dim pi366      As Long
+        For pi366 = 1 To Len(prms_str)
+            If Mid(prms_str, pi366, 1) = " " Then last_sp366 = pi366
+        Next pi366
+        If last_sp366 > 0 Then
+            ch366 = Mid(prms_str, last_sp366 + 1)
+        Else
+            ch366 = prms_str
+        End If
+        ch366 = Trim(ch366)
+        Dim wi366 As Long = win_find(ch366)
+        If wi366 >= 0 Then
+            wins(wi366).names_receiving = 0
+            win_hist_append(wi366, "*** " & wins(wi366).user_count & " users in " & ch366, col_fg_sys)
+        Else
+            hist_append("*** End of NAMES for " & ch366, col_fg_sys)
+        End If
+    
+    Case "332"
+        ' Topic reply: prms_str = "yournick #channel"  trail_str = topic text
+        Dim ch332       As String
+        Dim last_sp332  As Long = 0
+        Dim pi332       As Long
+        For pi332 = 1 To Len(prms_str)
+            If Mid(prms_str, pi332, 1) = " " Then last_sp332 = pi332
+        Next pi332
+        If last_sp332 > 0 Then
+            ch332 = Mid(prms_str, last_sp332 + 1)
+        Else
+            ch332 = prms_str
+        End If
+        ch332 = Trim(ch332)
+        Dim wi332 As Long = win_find(ch332)
+        If wi332 >= 0 Then
+            win_hist_append(wi332, "*** Topic: " & irc_strip_colors(trail_str), col_fg_sys)
+        Else
+            hist_append("*** Topic for " & ch332 & ": " & irc_strip_colors(trail_str), col_fg_sys)
+        End If
 
     Case "433"
         hist_append("*** Nickname in use: try /nick <newnick>", VT_BRIGHT_RED)
@@ -1416,9 +1571,25 @@ Sub irc_disconnect()
     sock_valid = 0
     connected  = 0
     recv_buf   = ""
+    ' Clear all non-win0 windows
+    Dim di As Long
+    For di = 1 To win_count - 1
+        wins(di).target          = ""
+        wins(di).is_pm           = 0
+        wins(di).unread          = 0
+        wins(di).hist_count      = 0
+        wins(di).hist_head       = 0
+        wins(di).top_line        = 0
+        wins(di).new_msgs        = 0
+        wins(di).user_count      = 0
+        wins(di).names_receiving = 0
+    Next di
+    wins(0).unread          = 0
+    wins(0).user_count      = 0
+    wins(0).names_receiving = 0
     win_count  = 1
     active_win = 0
-    wins(0).unread = 0
+    pane_dirty = 1
     hist_append("*** Disconnected from " & cfg.server, col_fg_sys)
 End Sub
 
@@ -1504,20 +1675,50 @@ Function irc_connect() As Byte
     End If
 
     sock_valid = 1
-    wins(0).target = cfg.channel
-    wins(0).is_pm  = 0
-    wins(0).unread = 0
-    If is_reconnect = 0 Then
-        wins(0).hist_count = 0
-        wins(0).hist_head  = 0
-        log_load_tail(LOG_TAIL_N)
-    End If
-    is_reconnect       = 0
-    wins(0).top_line   = 0
-    wins(0).new_msgs   = 0
-    win_count          = 1
-    active_win         = 0
     vt_net_nonblocking(sock, 1)
+
+    If is_reconnect = 0 Then
+        ' Fresh connect: clear all existing windows, then open one per channel
+        Dim ci_clr As Long
+        For ci_clr = 0 To win_count - 1
+            wins(ci_clr).target          = ""
+            wins(ci_clr).is_pm           = 0
+            wins(ci_clr).unread          = 0
+            wins(ci_clr).hist_count      = 0
+            wins(ci_clr).hist_head       = 0
+            wins(ci_clr).top_line        = 0
+            wins(ci_clr).new_msgs        = 0
+            wins(ci_clr).user_count      = 0
+            wins(ci_clr).names_receiving = 0
+        Next ci_clr
+        win_count = 0
+
+        Dim ch_arr() As String
+        Dim ch_cnt   As Long = vt_str_split(cfg.channel, ",", ch_arr())
+        Dim ci       As Long
+        For ci = 0 To ch_cnt - 1
+            Dim ch_name As String = Trim(ch_arr(ci))
+            If Len(ch_name) > 0 Then
+                Dim new_wi As Long = win_open(ch_name, 0)
+                If new_wi >= 0 Then log_load_tail(new_wi, LOG_TAIL_N)
+            End If
+        Next ci
+        ' Ensure at least one window always exists
+        If win_count = 0 Then win_open(cfg.server, 0)
+    Else
+        ' Reconnect: preserve history, reset per-window transient state
+        Dim rwi As Long
+        For rwi = 0 To win_count - 1
+            wins(rwi).top_line        = 0
+            wins(rwi).new_msgs        = 0
+            wins(rwi).unread          = 0
+            wins(rwi).user_count      = 0
+            wins(rwi).names_receiving = 0
+        Next rwi
+    End If
+    is_reconnect = 0
+    active_win   = 0
+    pane_dirty   = 1
 
     If Len(cfg.password) > 0 Then irc_send("PASS " & cfg.password)
     irc_send("NICK " & cfg.nick)
@@ -1536,6 +1737,7 @@ vt_scroll_enable(0)
 vt_mouse(1)
 vt_on_close(@on_close)
 vt_copypaste(VT_ENABLED)
+vt_view_print( CHAT_TOP_ROW, CHAT_BOT_ROW+1, CHAT_COL, SCREEN_COLS )
 
 cfg_file = ExePath() & "/.vtirc"
 cfg_defaults()
@@ -1587,14 +1789,12 @@ Do
 
     k = vt_inkey()
 
-    vt_view_print( CHAT_TOP_ROW, CHAT_BOT_ROW+1, CHAT_COL, SCREEN_COLS )
-
     ' -- mouse state ----------------------------------------------------------
     vt_getmouse(@mx, @my, @mb, @whl)
 
     ' -- pane listbox: mouse-only (k=0 so keyboard goes to chat input) --------
     Dim pane_ret As Long = VT_FORM_PENDING
-    If user_count > 0 Then
+    If wins(active_win).user_count > 0 Then
         pane_ret = vt_tui_listbox_handle(1, CHAT_TOP_ROW, PANE_W, CHAT_ROWS, _
                                          pane_items(), pane_lb_st, 0)
     End If
@@ -1604,7 +1804,7 @@ Do
     
     If pane_ret >= 0 Then pm_fire = 1   ' double-click in listbox
 
-    If pm_fire AndAlso user_count > 0 Then
+    If pm_fire AndAlso wins(active_win).user_count > 0 Then
         Dim sel_nick As String = pane_items(pane_lb_st.sel)
         If LCase(sel_nick) <> LCase(cfg.nick) Then
             Dim pm_wi As Long = win_open(sel_nick, 1)
@@ -1623,11 +1823,12 @@ Do
         If win_count > 1 Then
             active_win = (active_win + 1) Mod win_count
             wins(active_win).unread = 0
+            pane_dirty = 1
         End If
     ElseIf VT_CHAR(k) = 23 Then
-        If active_win > 0 Then
-            win_close_pm(active_win)
-            wins(active_win).unread = 0
+        ' Close active window only if it is a PM; channels are closed via /part
+        If active_win >= 0 AndAlso wins(active_win).is_pm Then
+            win_close(active_win)
         End If
     Else
         ' -- input form: pass all keys except history navigation keys ----------
@@ -1713,17 +1914,55 @@ Do
                     If Len(cmd_arg) > 0 Then irc_send("NICK " & cmd_arg)
 
                 Case "JOIN"
-                    If Len(cmd_arg) > 0 Then
-                        irc_send("JOIN " & cmd_arg)
-                        cfg.channel    = cmd_arg
-                        wins(0).target = cmd_arg
-                        user_list_clear()
-                        names_receiving = 0
+                    Dim join_ch As String = Trim(cmd_arg)
+                    If Len(join_ch) > 0 AndAlso connected Then
+                        Dim join_wi As Long = win_find(join_ch)
+                        If join_wi < 0 Then
+                            join_wi = win_open(join_ch, 0)
+                            If join_wi >= 0 Then
+                                log_load_tail(join_wi, LOG_TAIL_N)
+                                ' Append to cfg.channel if not already listed
+                                If InStr(LCase(cfg.channel), LCase(join_ch)) = 0 Then
+                                    If Len(cfg.channel) > 0 Then cfg.channel &= ","
+                                    cfg.channel &= join_ch
+                                    cfg_save()
+                                End If
+                            End If
+                        End If
+                        If join_wi >= 0 Then
+                            active_win = join_wi
+                            wins(active_win).unread = 0
+                            pane_dirty = 1
+                        End If
+                        irc_send("JOIN " & join_ch)
+                    ElseIf Len(join_ch) = 0 Then
+                        hist_append("*** Usage: /join <#channel>", VT_BRIGHT_RED)
+                    Else
+                        hist_append("*** Not connected.", VT_BRIGHT_RED)
                     End If
 
                 Case "PART"
-                    irc_send("PART " & cfg.channel)
-                    hist_append("*** You left " & cfg.channel, col_fg_sys)
+                    If wins(active_win).is_pm = 0 Then
+                        Dim part_tgt As String = wins(active_win).target
+                        irc_send("PART " & part_tgt)
+                        win_hist_append(active_win, "*** You left " & part_tgt, col_fg_sys)
+                        ' Remove from cfg.channel list and save
+                        Dim part_arr()  As String
+                        Dim part_cnt    As Long = vt_str_split(cfg.channel, ",", part_arr())
+                        Dim part_new    As String
+                        Dim pi          As Long
+                        For pi = 0 To part_cnt - 1
+                            If LCase(Trim(part_arr(pi))) <> LCase(part_tgt) Then
+                                If Len(part_new) > 0 Then part_new &= ","
+                                part_new &= Trim(part_arr(pi))
+                            End If
+                        Next pi
+                        cfg.channel = part_new
+                        cfg_save()
+                        win_close(active_win)
+                    Else
+                        win_hist_append(active_win, "*** /part: active window is a PM. Use Ctrl+W to close.", VT_BRIGHT_RED)
+                    End If
 
                 Case "AFK"
                     If connected Then
@@ -1745,7 +1984,7 @@ Do
                     End If
 
                 Case "NAMES"
-                    user_list_echo()
+                    user_list_echo(active_win)
 
                 Case "MSG"
                     If connected AndAlso Len(cmd_arg) > 0 Then
@@ -1797,8 +2036,6 @@ Do
 
     ' -- network poll ---------------------------------------------------------
     irc_poll()
-
-    'vt_view_print
 
     draw_all()
     vt_sleep(IDLE_MS)
