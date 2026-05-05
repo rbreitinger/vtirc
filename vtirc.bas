@@ -6,11 +6,7 @@
 #Define VT_USE_TUI
 #Include Once "vt/vt.bi"
 
-' IDEAS:
-' show last n messages from logfile when starting the client (maybe 200?)
-' show timestamps "[hour/minute]" in chat history (optional, settings F3 "show timestamps" [x], default=on)
-
-Const VERSION      = "1.1.3"
+Const VERSION      = "1.2.0"
 Const HISTORY_MAX  = 2000
 Const CHAT_TOP_ROW = 2
 Const CHAT_BOT_ROW = 37
@@ -20,7 +16,7 @@ Const ROW_STATUS   = 40
 Const SCREEN_COLS  = 100
 Const SCREEN_ROWS  = 40
 ' left user-list pane
-Const PANE_W       = 18              ' pane width in columns
+Const PANE_W       = 18             ' pane width in columns
 Const PANE_SEP     = PANE_W + 1     ' = 19, vertical separator column
 Const CHAT_COL     = PANE_W + 2     ' = 20, first chat column
 Const CHAT_WIDE    = SCREEN_COLS - PANE_W - 1  ' = 81, chat display width
@@ -31,7 +27,8 @@ Const FORM_X       = (SCREEN_COLS - FORM_W) \ 2
 Const FORM_Y       = (SCREEN_ROWS - FORM_H) \ 2
 ' F3 common settings form
 Const CFORM_W      = 40
-Const CFORM_H      = 13
+Const CFORM_H      = 15     ' +2 for "Show timestamps" checkbox row
+Const LOG_TAIL_N   = 200    ' lines to replay from log on connect
 Const CFORM_X      = (SCREEN_COLS - CFORM_W) \ 2
 Const CFORM_Y      = (SCREEN_ROWS - CFORM_H) \ 2
 ' Window array
@@ -46,7 +43,8 @@ Type irc_config
     scheme         As Byte      ' 0=Dark  1=Classic  2=Light
     log_enabled    As Byte
     log_pm         As Byte      ' 0=off  1=log PM windows to file
-    auto_reconnect As Byte      ' 0=off  1=reconnect on unexpected drop
+    auto_reconnect  As Byte     ' 0=off  1=reconnect on unexpected drop
+    show_timestamps As Byte     ' 0=off  1=show [HH:MM] prefix in chat history (default=on)
 End Type
 
 Type irc_line
@@ -106,7 +104,9 @@ Declare Sub irc_on_drop()
 Declare Function win_find(tgt As String) As Long
 Declare Function win_open(tgt As String, pm As Byte) As Long
 Declare Sub win_hist_append(win_idx As Long, txt As String, col_fg As UByte)
+Declare Sub win_hist_raw(win_idx As Long, txt As String, col_fg As UByte)
 Declare Sub win_close_pm(win_idx As Long)
+Declare Sub log_load_tail(n As Long)
 Declare Sub pane_refresh()
 Declare Function irc_strip_colors(s As String) As String
 Declare Function mirc_wordwrap(txt As String, wid As Long) As String
@@ -188,7 +188,9 @@ Sub win_hist_append(win_idx As Long, txt As String, col_fg As UByte)
     ElseIf cfg.log_pm AndAlso wins(win_idx).is_pm Then
         log_write_pm(wins(win_idx).target, irc_strip_colors(txt))
     End If
-    Dim wrapped    As String = mirc_wordwrap(txt, CHAT_WIDE)
+    Dim disp_txt As String = txt
+    If cfg.show_timestamps Then disp_txt = "[" & Left(Time(), 5) & "] " & txt
+    Dim wrapped    As String = mirc_wordwrap(disp_txt, CHAT_WIDE)
     Dim parts()    As String
     Dim part_count As Long = vt_str_split(wrapped, Chr(10), parts())
     Dim i    As Long
@@ -218,6 +220,74 @@ Sub hist_append(txt As String, col_fg As UByte)
 End Sub
 
 ' -----------------------------------------------------------------------------
+' win_hist_raw -- insert into ring buffer without logging or timestamp prefix.
+' Used by log_load_tail so replayed lines are not re-logged and already carry
+' their own [date time] prefix from the log file.
+' -----------------------------------------------------------------------------
+Sub win_hist_raw(win_idx As Long, txt As String, col_fg As UByte)
+    If win_idx < 0 OrElse win_idx >= win_count Then Exit Sub
+    Dim wrapped    As String = mirc_wordwrap(txt, CHAT_WIDE)
+    Dim parts()    As String
+    Dim part_count As Long = vt_str_split(wrapped, Chr(10), parts())
+    Dim i    As Long
+    Dim slot As Long
+    For i = 0 To part_count - 1
+        If Len(parts(i)) = 0 Then Continue For
+        If wins(win_idx).hist_count < HISTORY_MAX Then
+            slot = (wins(win_idx).hist_head + wins(win_idx).hist_count) Mod HISTORY_MAX
+            wins(win_idx).history(slot).txt    = parts(i)
+            wins(win_idx).history(slot).col_fg = col_fg
+            wins(win_idx).hist_count += 1
+        Else
+            wins(win_idx).history(wins(win_idx).hist_head).txt    = parts(i)
+            wins(win_idx).history(wins(win_idx).hist_head).col_fg = col_fg
+            wins(win_idx).hist_head = (wins(win_idx).hist_head + 1) Mod HISTORY_MAX
+        End If
+    Next i
+End Sub
+
+' -----------------------------------------------------------------------------
+' log_load_tail -- read last n lines from channel log into win 0 on connect.
+' Only runs when log_enabled=1 (log was being written) and the file exists.
+' Lines are inserted raw (no timestamp re-added, no re-logging).
+' -----------------------------------------------------------------------------
+Sub log_load_tail(n As Long)
+    If cfg.log_enabled = 0 Then Exit Sub
+    If Len(cfg.server) = 0 OrElse Len(cfg.channel) = 0 Then Exit Sub
+    Dim ch_safe  As String = cfg.channel
+    If Left(ch_safe, 1) = "#" Then ch_safe = Mid(ch_safe, 2)
+    Dim log_path As String = ExePath() & "/" & cfg.server & "_" & ch_safe & ".log"
+    If vt_file_exists(log_path) = 0 Then Exit Sub
+
+    ' Ring buffer to capture last n lines without loading full file into memory
+    ReDim tail_lines(n - 1) As String
+    Dim ring_head As Long = 0
+    Dim ring_cnt  As Long = 0
+    Dim f         As Long = FreeFile()
+    Dim ln        As String
+    Open log_path For Input As #f
+    Do While EOF(f) = 0
+        Line Input #f, ln
+        If Len(ln) > 0 Then
+            tail_lines(ring_head) = ln
+            ring_head = (ring_head + 1) Mod n
+            If ring_cnt < n Then ring_cnt += 1
+        End If
+    Loop
+    Close #f
+
+    If ring_cnt = 0 Then Exit Sub
+
+    Dim ring_start As Long = IIf(ring_cnt < n, 0, ring_head)
+    win_hist_raw(0, "--- Replaying last " & ring_cnt & " log lines ---", col_fg_sys)
+    Dim i As Long
+    For i = 0 To ring_cnt - 1
+        win_hist_raw(0, tail_lines((ring_start + i) Mod n), VT_DARK_GREY)
+    Next i
+    win_hist_raw(0, "--- End of log ---", col_fg_sys)
+End Sub
+
+' -----------------------------------------------------------------------------
 ' Config
 ' -----------------------------------------------------------------------------
 Sub cfg_defaults()
@@ -229,7 +299,8 @@ Sub cfg_defaults()
     cfg.scheme      = 0
     cfg.log_enabled = 0
     cfg.log_pm      = 0
-    cfg.auto_reconnect = 0
+    cfg.auto_reconnect  = 0
+    cfg.show_timestamps = 1
 End Sub
 
 Function cfg_load() As Byte
@@ -255,6 +326,7 @@ Function cfg_load() As Byte
         Case "log_enabled" : cfg.log_enabled = Val(cfg_val)
         Case "log_pm"      : cfg.log_pm      = Val(cfg_val)
         Case "auto_reconnect" : cfg.auto_reconnect = Val(cfg_val)
+        Case "show_timestamps" : cfg.show_timestamps = Val(cfg_val)
         End Select
     Loop
     Close #f
@@ -273,6 +345,7 @@ Sub cfg_save()
     Print #f, "log_enabled="    & cfg.log_enabled
     Print #f, "log_pm="         & cfg.log_pm
     Print #f, "auto_reconnect=" & cfg.auto_reconnect
+    Print #f, "show_timestamps=" & cfg.show_timestamps
     Close #f
 End Sub
 
@@ -637,7 +710,7 @@ Sub help_window()
     help_txt  = " Keyboard Shortcuts"                    & VT_LF
     help_txt &= "  F1          This help"                & VT_LF
     help_txt &= "  F2          Server settings"          & VT_LF
-    help_txt &= "  F3          Colour / Log settings"    & VT_LF
+    help_txt &= "  F3          Client settings"          & VT_LF
     help_txt &= "  F10         Disconnect"               & VT_LF
     help_txt &= "  Alt+F4      Quit"                     & VT_LF
     help_txt &= "  Ctrl+Tab    Cycle windows"            & VT_LF
@@ -650,7 +723,7 @@ Sub help_window()
     help_txt &= ""                                       & VT_LF
     help_txt &= " User List (left pane)"                 & VT_LF
     help_txt &= "  Click nick to select"                 & VT_LF
-    help_txt &= "  Dbl-click or [PM] to open PM"         & VT_LF
+    help_txt &= "  Double-click to open PM"              & VT_LF
     help_txt &= ""                                       & VT_LF
     help_txt &= " Copy from history"                     & VT_LF
     help_txt &= "  1)hold LMB and drag to select"        & VT_LF
@@ -665,8 +738,9 @@ Sub help_window()
     help_txt &= "  /msg <n> [txt]   Open PM window"      & VT_LF
     help_txt &= "  /afk [msg]       Set away status"     & VT_LF
     help_txt &= "  /back            Return from AFK"     & VT_LF
+    help_txt &= "  /part            Leave channel"       & VT_LF    
     help_txt &= "  /join <ch>       Join channel"        & VT_LF
-    help_txt &= "  /part            Leave channel"       & VT_LF
+    help_txt &= "  Note:            Only 1 Channel yet"  & VT_LF
     help_txt &= "  /quit            Disconnect"          & VT_LF
     help_txt &= ""                                       & VT_LF
     help_txt &= " Color Input (EGA indexes)"             & VT_LF
@@ -812,7 +886,7 @@ End Function
 ' F3 -- Common settings form
 ' -----------------------------------------------------------------------------
 Function settings_common_form() As Long
-    Const ITEM_COUNT = 12
+    Const ITEM_COUNT = 14
     Dim items(0 To ITEM_COUNT - 1) As vt_tui_form_item
     Dim focused As Long = 1
     Dim k       As ULong
@@ -883,15 +957,28 @@ Function settings_common_form() As Long
     items(9).val     = "Auto-reconnect"
     items(9).checked = cfg.auto_reconnect
 
-    items(10).kind = VT_FORM_BUTTON
-    items(10).x    = 10 : items(10).y = 11
-    items(10).val  = "OK"
-    items(10).ret  = 1
+    items(10).kind   = VT_FORM_LABEL
+    items(10).x      = 1 : items(10).y   = 11
+    items(10).wid    = 10
+    items(10).val    = "Display:"
+    items(10).align  = VT_ALIGN_RIGHT
+    items(10).lbl_fg = VT_BLACK
+    items(10).lbl_bg = VT_LIGHT_GREY
 
-    items(11).kind = VT_FORM_BUTTON
-    items(11).x    = 22 : items(11).y = 11
-    items(11).val  = "Cancel"
-    items(11).ret  = 2
+    items(11).kind    = VT_FORM_CHECKBOX
+    items(11).x       = 12 : items(11).y = 11
+    items(11).val     = "Show timestamps [HH:MM]"
+    items(11).checked = cfg.show_timestamps
+
+    items(12).kind = VT_FORM_BUTTON
+    items(12).x    = 10 : items(12).y = 13
+    items(12).val  = "OK"
+    items(12).ret  = 1
+
+    items(13).kind = VT_FORM_BUTTON
+    items(13).x    = 22 : items(13).y = 13
+    items(13).val  = "Cancel"
+    items(13).ret  = 2
 
     vt_tui_form_offset(items(), CFORM_X, CFORM_Y)
     draw_all()
@@ -927,7 +1014,8 @@ Function settings_common_form() As Long
             If cfg.auto_reconnect = 1 AndAlso new_ar = 0 Then
                 reconnect_pending = 0
             End If
-            cfg.auto_reconnect = new_ar
+            cfg.auto_reconnect  = new_ar
+            cfg.show_timestamps = items(11).checked
             cfg_save()
             scheme_apply()
             Return 1
@@ -1421,6 +1509,7 @@ Function irc_connect() As Byte
     If is_reconnect = 0 Then
         wins(0).hist_count = 0
         wins(0).hist_head  = 0
+        log_load_tail(LOG_TAIL_N)
     End If
     is_reconnect       = 0
     wins(0).top_line   = 0
