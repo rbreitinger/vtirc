@@ -6,10 +6,7 @@
 #Define VT_USE_TUI
 #Include Once "vt/vt.bi"
 
-'IDEAS:
-'1) detect links "http:// and https:// , highlight them and make them clickable, open browser with link
-
-Const VERSION      = "1.4.0"
+Const VERSION      = "1.5.0"
 Const IDLE_MS      = 25
 Const HISTORY_MAX  = 2000
 Const USER_MAX     = 512
@@ -95,7 +92,15 @@ Dim Shared is_reconnect      As Byte   = 0
 
 ' active colour scheme
 Dim Shared As Ubyte col_bg_main, col_fg_body, col_fg_own, col_fg_other, _
-                    col_fg_sys, col_bar_fg, col_bar_bg
+                    col_fg_sys, col_bar_fg, col_bar_bg, col_fg_link
+                    
+' URL hit-map: rebuilt every draw_history call, one slot per visible chat row.
+Type url_hit_t
+    col_start As Long   ' screen col where URL starts (1-based)
+    col_end   As Long   ' screen col where URL ends (inclusive)
+    url_str   As String ' plain URL text; empty = no URL on this row
+End Type
+Dim Shared url_hit_map(CHAT_ROWS - 1) As url_hit_t
 
 ' pane user-list state
 Dim Shared pane_lb_st    As vt_tui_listbox_state
@@ -141,6 +146,8 @@ Declare Sub user_list_echo(win_idx As Long)
 Declare Function irc_strip_colors(s As String) As String
 Declare Function mirc_wordwrap(txt As String, wid As Long) As String
 Declare Sub channel_browser()
+Declare Function url_find_in_plain(plain_txt As String, ByRef u_start As Long, ByRef u_end As Long) As Byte
+Declare Sub  open_url(url_txt As String)
 
 ' Close callback
 Function on_close() As Byte
@@ -155,16 +162,19 @@ Sub scheme_apply()
         col_bg_main  = VT_BLACK      : col_fg_body  = VT_LIGHT_GREY
         col_fg_own   = VT_WHITE      : col_fg_other = VT_YELLOW
         col_fg_sys   = VT_GREEN      : col_bar_fg   = VT_BRIGHT_MAGENTA : col_bar_bg = VT_BLUE
+        col_fg_link  = VT_BRIGHT_CYAN
 
     Case 2  ' Light
         col_bg_main  = VT_LIGHT_GREY : col_fg_body  = VT_BLACK
         col_fg_own   = VT_BLUE       : col_fg_other = VT_RED
         col_fg_sys   = VT_DARK_GREY  : col_bar_fg   = VT_BLACK  : col_bar_bg = VT_WHITE
+        col_fg_link  = VT_BLUE
 
     Case Else  ' Dark (0, default)
         col_bg_main  = VT_BLACK      : col_fg_body  = VT_LIGHT_GREY
         col_fg_own   = VT_WHITE      : col_fg_other = VT_BRIGHT_CYAN
         col_fg_sys   = VT_DARK_GREY  : col_bar_fg   = VT_CYAN  : col_bar_bg = VT_DARK_GREY
+        col_fg_link  = VT_BRIGHT_CYAN
 
     End Select
 
@@ -633,6 +643,52 @@ Sub draw_mirc_line(ln_row As Long, base_fg As UByte, base_bg As UByte, _
     If Len(prt_buf) > 0 Then vt_print(prt_buf)
 End Sub
 
+' -----------------------------------------------------------------------------
+' url_find_in_plain -- scan a colour-stripped line for the first http(s):// URL.
+' Returns 1 on success; u_start and u_end are 1-based positions in plain_txt.
+' -----------------------------------------------------------------------------
+Function url_find_in_plain(plain_txt As String, ByRef u_start As Long, ByRef u_end As Long) As Byte
+    Dim http_pos  As Long = InStr(plain_txt, "http://")
+    Dim https_pos As Long = InStr(plain_txt, "https://")
+
+    If http_pos = 0 AndAlso https_pos = 0 Then Return 0
+
+    Dim srch As Long
+    If http_pos = 0 Then
+        srch = https_pos
+    ElseIf https_pos = 0 Then
+        srch = http_pos
+    Else
+        srch = IIf(http_pos < https_pos, http_pos, https_pos)
+    End If
+
+    u_start = srch
+    Dim ii   As Long = srch
+    Dim slen As Long = Len(plain_txt)
+    Do While ii <= slen
+        Dim uch As UByte = Asc(plain_txt, ii)
+        If uch = 32 OrElse uch = 9 Then Exit Do   ' space or tab ends URL
+        ii += 1
+    Loop
+    u_end = ii - 1
+
+    If u_end < u_start Then Return 0
+    Return 1
+End Function
+
+' -----------------------------------------------------------------------------
+' open_url -- launch the system browser for url_txt.
+' -----------------------------------------------------------------------------
+Sub open_url(url_txt As String)
+    If Len(url_txt) = 0 Then Exit Sub
+    #ifdef __FB_WIN32__
+        Shell "start """" """ & url_txt & """"
+    #else
+        Shell "xdg-open """ & url_txt & """"
+    #endif
+End Sub
+
+
 Sub draw_history()
     Dim row      As Long
     Dim i        As Long
@@ -652,7 +708,33 @@ Sub draw_history()
         If row > CHAT_BOT_ROW Then Exit For
         ri       = (w_hh + i) Mod HISTORY_MAX
         txt_disp = wins(active_win).history(ri).txt
+
         draw_mirc_line(row, wins(active_win).history(ri).col_fg, col_bg_main, txt_disp, CHAT_WIDE)
+
+        ' --- URL hit-map update -----------------------------------------------
+        Dim hm_idx As Long = row - CHAT_TOP_ROW
+        url_hit_map(hm_idx).url_str   = ""
+        url_hit_map(hm_idx).col_start = 0
+        url_hit_map(hm_idx).col_end   = 0
+
+        Dim plain_ln As String = irc_strip_colors(txt_disp)
+        Dim pu_s     As Long
+        Dim pu_e     As Long
+        If url_find_in_plain(plain_ln, pu_s, pu_e) Then
+            Dim sc_s As Long = CHAT_COL + pu_s - 1
+            Dim sc_e As Long = CHAT_COL + pu_e - 1
+            If sc_e > CHAT_COL + CHAT_WIDE - 1 Then sc_e = CHAT_COL + CHAT_WIDE - 1
+            If sc_s <= sc_e Then
+                url_hit_map(hm_idx).col_start = sc_s
+                url_hit_map(hm_idx).col_end   = sc_e
+                url_hit_map(hm_idx).url_str   = Mid(plain_ln, pu_s, pu_e - pu_s + 1)
+                vt_color(col_fg_link, col_bg_main)
+                vt_locate(row, sc_s)
+                vt_print(Mid(plain_ln, pu_s, pu_e - pu_s + 1))
+            End If
+        End If
+        ' ----------------------------------------------------------------------
+
         row += 1
     Next i
 End Sub
@@ -2059,6 +2141,22 @@ Do
             End If
         End If
     End If
+
+    ' -- URL click detection (left-button press edge, chat area only) ----------
+    Dim url_lclick As Byte = (mb And VT_MOUSE_BTN_LEFT) And _
+                             Not (prev_mb And VT_MOUSE_BTN_LEFT)
+    If url_lclick AndAlso my >= CHAT_TOP_ROW AndAlso my <= CHAT_BOT_ROW _
+                  AndAlso mx >= CHAT_COL Then
+        Dim uc_idx As Long = my - CHAT_TOP_ROW
+        If Len(url_hit_map(uc_idx).url_str) > 0 Then
+            If mx >= url_hit_map(uc_idx).col_start AndAlso _
+               mx <= url_hit_map(uc_idx).col_end Then
+                open_url(url_hit_map(uc_idx).url_str)
+            End If
+        End If
+    End If
+    ' --------------------------------------------------------------------------
+
     prev_mb = mb
 
     ' -- Ctrl+Tab / Ctrl+W window management ----------------------------------
