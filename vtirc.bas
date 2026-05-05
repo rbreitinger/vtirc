@@ -7,7 +7,8 @@
 #Include Once "vt/vt.bi"
 
 ' IDEAS:
-' show last n messages from logfile when starting the client (maybe 300?)
+' show last n messages from logfile when starting the client (maybe 200?)
+' show timestamps "[hour/minute]" in chat history (optional, settings F3 "show timestamps" [x], default=on)
 
 Const VERSION      = "1.1.3"
 Const HISTORY_MAX  = 2000
@@ -578,6 +579,9 @@ End Sub
 Sub draw_input()
     Dim prefix  As String = cfg.nick & "> "
     Dim pfx_len As Long   = Len(prefix)
+    ' horizontal separator between history and input line
+    vt_tui_hline(PANE_SEP+1, ROW_INPUT-1, CHAT_WIDE, col_fg_sys, col_bg_main)
+
     vt_color(col_fg_body, col_bg_main)
     vt_locate(ROW_INPUT, CHAT_COL)
     vt_print(prefix)
